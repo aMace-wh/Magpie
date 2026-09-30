@@ -1,0 +1,171 @@
+/* Saves grouped by country (CountryGroups.tsx). Builds on .list / .list-row / .pill from styles.css. */
+
+.cg {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.cg-group {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.cg-heading {
+  margin: 0;
+  font: inherit;
+}
+
+.cg-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+
+.cg-head:hover {
+  background: var(--surface-2);
+}
+
+.cg-flag {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--surface-2);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.cg-head:hover .cg-flag {
+  background: var(--surface-3);
+}
+
+.cg-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cg-name {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cg-counts {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cg-total {
+  flex: 0 0 auto;
+  min-width: 28px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.cg-chevron {
+  flex: 0 0 auto;
+  color: var(--faint);
+  transition: transform 0.2s ease;
+}
+
+.cg-head[aria-expanded='true'] .cg-chevron {
+  transform: rotate(180deg);
+}
+
+.cg-body {
+  padding: 0 14px 6px;
+  border-top: 1px solid var(--border);
+}
+
+.cg-city {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  margin: 14px 0 2px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cg-city-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cg-city-count {
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+
+/* Each row sits in its own <li>, so .list-row:last-child alone would drop every divider. */
+.cg-list li:not(:last-child) > .list-row {
+  border-bottom: 1px solid var(--border);
+}
+
+.cg-list .list-row {
+  color: var(--text);
+}
+
+.cg-list .list-row:hover .t {
+  color: var(--accent);
+}
+
+.cg-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.cg-sub .pill {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.cg-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cg-empty {
+  padding: 32px 16px;
+}

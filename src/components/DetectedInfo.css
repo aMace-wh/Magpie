@@ -1,0 +1,97 @@
+/* Builds on .detected (styles.css): a tinted box with the type picker. */
+
+.detected.detected-info {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+
+.detected-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.detected-icon {
+  flex: 0 0 auto;
+}
+
+.detected-info .select {
+  max-width: 100%;
+}
+
+.detected-from {
+  min-width: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.detected-author {
+  color: var(--faint);
+}
+
+.detected-unsure {
+  padding: 2px 8px;
+  border: 1px dashed var(--faint);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.detected-reasons,
+.detected-alts {
+  /* Lines up under the text, past the sparkle icon. */
+  padding-left: 28px;
+}
+
+.detected-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0;
+  margin: 0;
+  list-style: none;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.detected-reasons li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detected-reasons li + li::before {
+  content: '·';
+  margin: 0 6px;
+  color: var(--faint);
+}
+
+.detected-alts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.detected-or {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.detected-alts .chip.tag {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+@media (max-width: 380px) {
+  .detected-reasons,
+  .detected-alts {
+    padding-left: 0;
+  }
+}

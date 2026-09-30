@@ -1,0 +1,454 @@
+import { describe, expect, it } from 'vitest';
+import {
+  addDaysIso,
+  addMinutesIso,
+  compareWhen,
+  daysUntil,
+  extractWhen,
+  findWhen,
+  formatWhen,
+  isAllDay,
+  isValidWhenString,
+  nextWeekRange,
+  normalizeWhen,
+  parseLocal,
+  relativeWhen,
+  toLocalIso,
+  weekendRange,
+  whenFromFields,
+  whenFromTexts,
+  whenStatus,
+  whenToFields,
+  type WhenFields,
+} from './when';
+import type { When } from './types';
+
+// Wed 30 Sep 2026, 10:00 local time.
+const NOW = new Date(2026, 8, 30, 10, 0);
+const at = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m - 1, d, h, min);
+const x = (text: string, now = NOW) => extractWhen(text, now);
+/** start/end only, so expectations don't depend on the exact source phrase. */
+const se = (text: string, now = NOW) => {
+  const w = x(text, now);
+  return w && { start: w.start, end: w.end };
+};
+const GB12 = 'en-GB-u-hc-h12';
+
+describe('extractWhen: single dates', () => {
+  it('reads day-month and month-day in all their spellings', () => {
+    expect(se('12 Oct')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('Oct 12')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('October 12th')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('12th of October 2026')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('Saturday, October 10')).toEqual({ start: '2026-10-10', end: undefined });
+    expect(se('Sept. 3rd, 2027')).toEqual({ start: '2027-09-03', end: undefined });
+    expect(se('on the 1st of Dec')).toEqual({ start: '2026-12-01', end: undefined });
+  });
+
+  it('reads a weekday + date + time and keeps the phrase as the source', () => {
+    expect(x('Sat 12 Oct 7:30pm')).toEqual({ start: '2026-10-12T19:30', source: 'Sat 12 Oct 7:30pm' });
+    expect(x('Come along! Sat 12 Oct 7:30pm 🎷')?.source).toBe('Sat 12 Oct 7:30pm');
+    expect(se('Sat 12 Oct 19:30')).toEqual({ start: '2026-10-12T19:30', end: undefined });
+    expect(se('12 October 2026, 7.30 p.m.')).toEqual({ start: '2026-10-12T19:30', end: undefined });
+  });
+
+  it('reads ISO and numeric dates (day first unless impossible)', () => {
+    expect(se('2026-10-12')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('Starts 2026-10-12T19:30')).toEqual({ start: '2026-10-12T19:30', end: undefined });
+    expect(se('12/10/2026')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('12.10.2026')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('13/10/2026')).toEqual({ start: '2026-10-13', end: undefined });
+    expect(se('10/13/2026')).toEqual({ start: '2026-10-13', end: undefined });
+    expect(se('Gig 12/10/26 8pm')).toEqual({ start: '2026-10-12T20:00', end: undefined });
+    // Without a year only after a weekday.
+    expect(se('Wed 14/10 8pm')).toEqual({ start: '2026-10-14T20:00', end: undefined });
+    expect(x('14/10')).toBeUndefined();
+  });
+
+  it('picks the next occurrence when the year is missing', () => {
+    expect(se('3 Jan')).toEqual({ start: '2027-01-03', end: undefined });
+    expect(se('30 Sep')).toEqual({ start: '2026-09-30', end: undefined });
+    expect(se('29 Sep')).toEqual({ start: '2027-09-29', end: undefined });
+    expect(se('29 Feb')).toEqual({ start: '2028-02-29', end: undefined });
+    expect(x('31 Sep')).toBeUndefined();
+  });
+
+  it('keeps an explicit year even when it is in the past', () => {
+    expect(se('12 Oct 2025')).toEqual({ start: '2025-10-12', end: undefined });
+  });
+
+  it('offers, rather than trusts, a date whose weekday does not match', () => {
+    // 12 Oct 2026 is a Monday: probably an old post (it was a Saturday in 2024).
+    const clash = findWhen('Sat 12 Oct 7:30pm');
+    expect(clash?.when).toEqual({ start: '2026-10-12T19:30', source: 'Sat 12 Oct 7:30pm' });
+    expect(clash?.confidence).toBe('low');
+    expect(findWhen('Sat 10 Oct 7:30pm')?.confidence).toBe('high');
+    expect(findWhen('Wed 14/10 8pm')?.confidence).toBe('high');
+    expect(findWhen('Thu 14/10 8pm')?.confidence).toBe('low');
+    expect(findWhen('until Sat 5 Jan')?.confidence).toBe('low');
+    expect(findWhen('Sat 16 – Sun 18 October')?.confidence).toBe('low');
+    expect(findWhen('Fri 16 – Sun 18 October')?.confidence).toBe('high');
+    expect(findWhen('Mon 12 Oct – Fri 16 Oct')?.confidence).toBe('high');
+    expect(findWhen('Sat 12 Oct – Fri 16 Oct')?.confidence).toBe('low');
+    // A date that agrees with its weekday wins over one that doesn't.
+    expect(se('Sat 12 Oct 7:30pm, or Tue 20 Oct')).toEqual({ start: '2026-10-20', end: undefined });
+  });
+
+  it('rejects impossible days instead of guessing the month', () => {
+    expect(x('29 February 2027')).toBeUndefined();
+    expect(x('30 Feb 2027')).toBeUndefined();
+    expect(x('Feb 30, 2027')).toBeUndefined();
+    expect(x('31 Sep 2026')).toBeUndefined();
+    expect(x('Sat 30 Feb 2027 7pm')).toBeUndefined();
+    expect(se('29 February 2028')).toEqual({ start: '2028-02-29', end: undefined });
+  });
+
+  it('handles month + year as the whole month', () => {
+    expect(se('Nov 2026')).toEqual({ start: '2026-11-01', end: '2026-11-30' });
+    expect(se('Open studios all of February 2028')).toEqual({ start: '2028-02-01', end: '2028-02-29' });
+  });
+});
+
+describe('extractWhen: relative days and weekdays', () => {
+  it('understands today, tonight and tomorrow', () => {
+    expect(se('today')).toEqual({ start: '2026-09-30', end: undefined });
+    expect(se('tonight')).toEqual({ start: '2026-09-30', end: undefined });
+    expect(se('Live tonight at 8')).toEqual({ start: '2026-09-30T20:00', end: undefined });
+    expect(se('tonight 9:30pm')).toEqual({ start: '2026-09-30T21:30', end: undefined });
+    expect(se('tomorrow')).toEqual({ start: '2026-10-01', end: undefined });
+    expect(se('7pm tomorrow')).toEqual({ start: '2026-10-01T19:00', end: undefined });
+  });
+
+  it('resolves weekdays', () => {
+    expect(se('Friday 7pm')).toEqual({ start: '2026-10-02T19:00', end: undefined });
+    expect(se('this Saturday')).toEqual({ start: '2026-10-03', end: undefined });
+    expect(se('next Friday')).toEqual({ start: '2026-10-09', end: undefined });
+    expect(se('see you on Sunday!')).toEqual({ start: '2026-10-04', end: undefined });
+    expect(se('Thursday night')).toEqual({ start: '2026-10-01', end: undefined });
+    // A Wednesday 9am event seen on Wednesday at 10:00 is next week's.
+    expect(se('Wednesday 9am')).toEqual({ start: '2026-10-07T09:00', end: undefined });
+  });
+
+  it('understands weekends', () => {
+    expect(se('this weekend')).toEqual({ start: '2026-10-03', end: '2026-10-04' });
+    expect(se('next weekend')).toEqual({ start: '2026-10-10', end: '2026-10-11' });
+    expect(se('Pop-up market this weekend! 10am-4pm')).toEqual({ start: '2026-10-03', end: '2026-10-04' });
+    // Seen on a Sunday: what's left of this weekend is today.
+    expect(se('this weekend', at(2026, 10, 4, 9))).toEqual({ start: '2026-10-04', end: undefined });
+  });
+
+  it('prefers named dates over loose words', () => {
+    expect(se('Made this today — next one is Sat 17 Oct')).toEqual({ start: '2026-10-17', end: undefined });
+    expect(findWhen('Made this today')?.confidence).toBe('low');
+    expect(findWhen('Sat 17 Oct')?.confidence).toBe('high');
+  });
+});
+
+describe('extractWhen: periods', () => {
+  it('reads day ranges, rolling a past range into next year', () => {
+    expect(se('12–14 July')).toEqual({ start: '2027-07-12', end: '2027-07-14' });
+    expect(se('12th - 14th July 2026')).toEqual({ start: '2026-07-12', end: '2026-07-14' });
+    expect(se('July 12-14')).toEqual({ start: '2027-07-12', end: '2027-07-14' });
+    expect(se('Fri 16 – Sun 18 October')).toEqual({ start: '2026-10-16', end: '2026-10-18' });
+    expect(se('Sat 3 & Sun 4 Oct')).toEqual({ start: '2026-10-03', end: '2026-10-04' });
+  });
+
+  it('reads ranges across months and years', () => {
+    expect(se('12 July - 3 August 2026')).toEqual({ start: '2026-07-12', end: '2026-08-03' });
+    expect(se('Oct 3 – Oct 20')).toEqual({ start: '2026-10-03', end: '2026-10-20' });
+    expect(se('30 Oct – 2 Nov')).toEqual({ start: '2026-10-30', end: '2026-11-02' });
+    expect(se('30–2 Nov')).toEqual({ start: '2026-10-30', end: '2026-11-02' });
+    expect(se('28 Dec – 3 Jan')).toEqual({ start: '2026-12-28', end: '2027-01-03' });
+    expect(se('20 Dec 2026 to 5 Jan 2027')).toEqual({ start: '2026-12-20', end: '2027-01-05' });
+    expect(se('2026-10-12 to 2026-10-14')).toEqual({ start: '2026-10-12', end: '2026-10-14' });
+    expect(se('October 2026 – March 2027')).toEqual({ start: '2026-10-01', end: '2027-03-31' });
+  });
+
+  it('keeps start and end times written between and after the two dates', () => {
+    expect(x('Dec 31 10pm - Jan 1 2am')).toEqual({ start: '2026-12-31T22:00', end: '2027-01-01T02:00', source: 'Dec 31 10pm - Jan 1 2am' });
+    expect(se('NYE: 31 Dec at 10pm until 1 Jan at 2am')).toEqual({ start: '2026-12-31T22:00', end: '2027-01-01T02:00' });
+    expect(se('12 Oct 7pm – 14 Oct 5pm')).toEqual({ start: '2026-10-12T19:00', end: '2026-10-14T17:00' });
+    expect(se('Fri 16 Oct 19:00 - Sun 18 Oct 17:30')).toEqual({ start: '2026-10-16T19:00', end: '2026-10-18T17:30' });
+    // Start time only: from that time until the end of the last day.
+    expect(se('Fri 16 Oct 7pm – Sun 18 Oct')).toEqual({ start: '2026-10-16T19:00', end: '2026-10-18' });
+    expect(se('2026-10-12 19:00 to 2026-10-14 18:00')).toEqual({ start: '2026-10-12T19:00', end: '2026-10-14T18:00' });
+    // "&" lists separate days, it doesn't make a timed range.
+    expect(se('12 Oct 7pm & 14 Oct')).toEqual({ start: '2026-10-12T19:00', end: undefined });
+    // Daily hours stay with their own day.
+    expect(se('Sat 10 Oct 7-11pm, Sun 11 Oct 2-6pm')).toEqual({ start: '2026-10-10T19:00', end: '2026-10-10T23:00' });
+  });
+
+  it('keeps a range that is on right now in this year', () => {
+    expect(se('25 Sep – 5 Oct')).toEqual({ start: '2026-09-25', end: '2026-10-05' });
+  });
+
+  it('reads "until" phrases as today → that date', () => {
+    expect(x('until 5 Jan')).toEqual({ start: '2026-09-30', end: '2027-01-05', source: 'until 5 Jan' });
+    expect(x('Exhibition runs until 5 January')).toEqual({ start: '2026-09-30', end: '2027-01-05', source: 'runs until 5 January' });
+    expect(se('On through Jan 5')).toEqual({ start: '2026-09-30', end: '2027-01-05' });
+    expect(se('Ends 5 Jan.')).toEqual({ start: '2026-09-30', end: '2027-01-05' });
+    expect(se('Open until Sunday')).toEqual({ start: '2026-09-30', end: '2026-10-04' });
+    expect(se('Last chance: ends this Sunday')).toEqual({ start: '2026-09-30', end: '2026-10-04' });
+    expect(se('on until next Friday')).toEqual({ start: '2026-09-30', end: '2026-10-09' });
+  });
+
+  it('reads "from" phrases as a start date', () => {
+    expect(x('from 1 Nov')).toEqual({ start: '2026-11-01', source: 'from 1 Nov' });
+    expect(se('Opening 14 Nov 6pm')).toEqual({ start: '2026-11-14T18:00', end: undefined });
+  });
+});
+
+describe('extractWhen: times', () => {
+  it('reads time ranges and open ends', () => {
+    expect(se('Sat 10 Oct 7pm–11pm')).toEqual({ start: '2026-10-10T19:00', end: '2026-10-10T23:00' });
+    expect(se('Sat 10 Oct 7-11pm')).toEqual({ start: '2026-10-10T19:00', end: '2026-10-10T23:00' });
+    expect(se('10 Oct 19:00 - 23:30')).toEqual({ start: '2026-10-10T19:00', end: '2026-10-10T23:30' });
+    expect(se('10 Oct 10pm - 2am')).toEqual({ start: '2026-10-10T22:00', end: '2026-10-11T02:00' });
+    expect(x('10 Oct 7pm till late')).toEqual({ start: '2026-10-10T19:00', source: '10 Oct 7pm till late' });
+  });
+
+  it('finds "doors" times next to or away from the date', () => {
+    expect(se('Sat 10 Oct, doors 7pm')).toEqual({ start: '2026-10-10T19:00', end: undefined });
+    expect(se('Oct 3 - 7pm')).toEqual({ start: '2026-10-03T19:00', end: undefined });
+    expect(se('Doors 7pm · Sat 10 Oct')).toEqual({ start: '2026-10-10T19:00', end: undefined });
+    expect(se('🎶 LIVE 🎶\nSaturday 10th October\n📍 The Old Mill\nDoors open at 7:30pm')).toEqual({
+      start: '2026-10-10T19:30',
+      end: undefined,
+    });
+  });
+
+  it('copes with messy real-world posts', () => {
+    expect(se('✨ SUPPER CLUB ✨ Fri 16th Oct — 7.30pm — £45pp — link in bio')).toEqual({ start: '2026-10-16T19:30', end: undefined });
+    expect(se('Exhibition: 3 Oct – 20 Dec 2026 at the Tate. Tickets £12. Open daily 10am-6pm')).toEqual({
+      start: '2026-10-03',
+      end: '2026-12-20',
+    });
+    expect(se('Posted 01/09/2026 — gig Sat 17 Oct, 8pm')).toEqual({ start: '2026-10-17T20:00', end: undefined });
+    expect(se('Tickets on sale 1 Oct! Show: 14 Nov')).toEqual({ start: '2026-11-14', end: undefined });
+    expect(se('See https://example.com/events/2026-01-01/ for 12 Oct')).toEqual({ start: '2026-10-12', end: undefined });
+  });
+
+  it('combines several text fields', () => {
+    expect(whenFromTexts(['Jazz night', null, undefined, 'Thu 8 Oct, 8pm'], NOW)?.start).toBe('2026-10-08T20:00');
+    expect(whenFromTexts([null, ''], NOW)).toBeUndefined();
+  });
+});
+
+describe('extractWhen: false positives', () => {
+  const nothing = [
+    '15 minute pasta',
+    '5k run',
+    '1/2 cup flour',
+    '£12',
+    '2 tbsp olive oil',
+    'top 10 cafes in Lisbon',
+    'open 24/7',
+    '30 min full body',
+    '3pm',
+    'Doors 7pm',
+    'Serves 4',
+    'Call 020 7946 0958',
+    'Call +1 (555) 123-4567',
+    'only $12.99!',
+    'Version 2.4.1 is out',
+    'v1.12.26',
+    '1-2 people',
+    'iPhone 15',
+    'you may 2x the sauce',
+    'Open Mon-Fri 9am-5pm',
+    'Every Friday 7pm',
+    'closed on Monday',
+    'I sat down with sun-dried tomatoes',
+    'Posted on Friday',
+    '',
+  ];
+  it.each(nothing)('returns undefined for %j', (text) => {
+    expect(x(text)).toBeUndefined();
+  });
+
+  it('still reads a capitalised May', () => {
+    expect(se('May 5')).toEqual({ start: '2027-05-05', end: undefined });
+  });
+});
+
+describe('helpers', () => {
+  it('parseLocal reads local wall-clock time', () => {
+    const d = parseLocal('2026-10-12');
+    expect([d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()]).toEqual([2026, 9, 12, 0]);
+    const t = parseLocal('2026-10-12T19:30');
+    expect([t.getDate(), t.getHours(), t.getMinutes()]).toEqual([12, 19, 30]);
+    expect(Number.isNaN(parseLocal('12 Oct').getTime())).toBe(true);
+  });
+
+  it('isAllDay / isValidWhenString', () => {
+    expect(isAllDay('2026-10-12')).toBe(true);
+    expect(isAllDay('2026-10-12T19:30')).toBe(false);
+    expect(isValidWhenString('2026-10-12T19:30')).toBe(true);
+    expect(isValidWhenString('2028-02-29')).toBe(true);
+    expect(isValidWhenString('2026-02-29')).toBe(false);
+    expect(isValidWhenString('2026-13-01')).toBe(false);
+    expect(isValidWhenString('2026-10-12T24:00')).toBe(false);
+    expect(isValidWhenString('2026-10-12 19:30')).toBe(false);
+    expect(isValidWhenString('2026-1-5')).toBe(false);
+    expect(isValidWhenString(20261012)).toBe(false);
+  });
+
+  it('date arithmetic stays floating', () => {
+    expect(addDaysIso('2026-12-31', 1)).toBe('2027-01-01');
+    expect(addDaysIso('2026-10-12T19:30', -12)).toBe('2026-09-30T19:30');
+    expect(addMinutesIso('2026-12-31T23:30', 120)).toBe('2027-01-01T01:30');
+    expect(toLocalIso(at(2026, 3, 29, 23, 45))).toBe('2026-03-29');
+    expect(toLocalIso(at(2026, 3, 29, 23, 45), true)).toBe('2026-03-29T23:45');
+    expect(weekendRange(NOW)).toEqual({ start: '2026-10-03', end: '2026-10-04' });
+    expect(weekendRange(at(2026, 10, 3, 12))).toEqual({ start: '2026-10-03', end: '2026-10-04' });
+    expect(nextWeekRange(NOW)).toEqual({ start: '2026-10-05', end: '2026-10-11' });
+  });
+
+  it('normalizeWhen validates, swaps and tidies', () => {
+    expect(normalizeWhen({ start: '2026-10-14', end: '2026-10-12' })).toEqual({ start: '2026-10-12', end: '2026-10-14' });
+    expect(normalizeWhen({ start: '2026-10-12T21:00', end: '2026-10-12T19:00' })).toEqual({ start: '2026-10-12T19:00', end: '2026-10-12T21:00' });
+    expect(normalizeWhen({ start: '2026-10-12', end: 'soon' })).toEqual({ start: '2026-10-12' });
+    expect(normalizeWhen({ start: '2026-10-12', end: '2026-10-12' })).toEqual({ start: '2026-10-12' });
+    expect(normalizeWhen({ start: '2026-10-12T19:00', end: '2026-10-12' })).toEqual({ start: '2026-10-12T19:00' });
+    expect(normalizeWhen({ start: '2026-10-12', source: '  Sat\n 12 Oct ' })).toEqual({ start: '2026-10-12', source: 'Sat 12 Oct' });
+    expect(normalizeWhen({ start: '2026-02-30' })).toBeUndefined();
+    expect(normalizeWhen(undefined)).toBeUndefined();
+    expect(normalizeWhen('2026-10-12')).toBeUndefined();
+  });
+
+  it('whenStatus: all-day ends are inclusive, timed events last 3 hours', () => {
+    const day: When = { start: '2026-10-12' };
+    expect(whenStatus(day, at(2026, 10, 11, 23, 59))).toBe('upcoming');
+    expect(whenStatus(day, at(2026, 10, 12, 23, 59))).toBe('ongoing');
+    expect(whenStatus(day, at(2026, 10, 13, 0, 0))).toBe('past');
+    const range: When = { start: '2026-10-12', end: '2026-10-14' };
+    expect(whenStatus(range, at(2026, 10, 14, 23, 59))).toBe('ongoing');
+    expect(whenStatus(range, at(2026, 10, 15, 0, 1))).toBe('past');
+    const gig: When = { start: '2026-10-12T19:30' };
+    expect(whenStatus(gig, at(2026, 10, 12, 19, 29))).toBe('upcoming');
+    expect(whenStatus(gig, at(2026, 10, 12, 22, 29))).toBe('ongoing');
+    expect(whenStatus(gig, at(2026, 10, 12, 22, 31))).toBe('past');
+    expect(whenStatus({ start: '2026-10-12T19:30', end: '2026-10-12T20:00' }, at(2026, 10, 12, 20, 1))).toBe('past');
+  });
+
+  it('daysUntil and compareWhen', () => {
+    expect(daysUntil({ start: '2026-10-03' }, NOW)).toBe(3);
+    expect(daysUntil({ start: '2026-09-30T23:00' }, NOW)).toBe(0);
+    expect(daysUntil({ start: '2026-09-25', end: '2026-10-05' }, NOW)).toBe(-5);
+    const list: (When | undefined)[] = [undefined, { start: '2026-10-12T19:00' }, { start: '2026-10-12' }, { start: '2026-10-01', end: '2026-10-20' }, { start: '2026-10-01' }];
+    expect(list.sort(compareWhen)).toEqual([
+      { start: '2026-10-01' },
+      { start: '2026-10-01', end: '2026-10-20' },
+      { start: '2026-10-12' },
+      { start: '2026-10-12T19:00' },
+      undefined,
+    ]);
+  });
+});
+
+describe('formatWhen', () => {
+  it('formats single days, with relative words for today and tomorrow', () => {
+    expect(formatWhen({ start: '2026-10-10T19:30' }, NOW, GB12)).toBe('Sat 10 Oct · 7:30 pm');
+    expect(formatWhen({ start: '2026-10-10T19:30' }, NOW, 'en-GB')).toBe('Sat 10 Oct · 19:30');
+    expect(formatWhen({ start: '2026-10-10T19:30' }, NOW, 'en-US')).toBe('Sat Oct 10 · 7:30 PM');
+    expect(formatWhen({ start: '2026-09-30T19:00' }, NOW, GB12)).toBe('Today · 7 pm');
+    expect(formatWhen({ start: '2026-10-01' }, NOW, GB12)).toBe('Tomorrow');
+    expect(formatWhen({ start: '2026-10-10' }, NOW, GB12)).toBe('Sat 10 Oct');
+  });
+
+  it('formats ranges, showing the year only when it is not the current one', () => {
+    expect(formatWhen({ start: '2026-07-12', end: '2026-07-14' }, NOW, GB12)).toBe('12–14 Jul');
+    expect(formatWhen({ start: '2027-07-12', end: '2027-08-03' }, NOW, GB12)).toBe('12 Jul – 3 Aug 2027');
+    expect(formatWhen({ start: '2026-12-28', end: '2027-01-03' }, NOW, GB12)).toBe('28 Dec – 3 Jan 2027');
+    expect(formatWhen({ start: '2026-12-28', end: '2027-01-03' }, NOW, 'en-US')).toBe('Dec 28 – Jan 3, 2027');
+    expect(formatWhen({ start: '2027-12-28', end: '2028-01-03' }, NOW, GB12)).toBe('28 Dec 2027 – 3 Jan 2028');
+    expect(formatWhen({ start: '2027-07-12', end: '2027-07-14' }, NOW, 'en-US')).toBe('Jul 12–14, 2027');
+    expect(formatWhen({ start: '2025-12-28', end: '2026-01-03' }, NOW, GB12)).toBe('28 Dec 2025 – 3 Jan 2026');
+    expect(formatWhen({ start: '2026-11-01', end: '2026-11-30' }, NOW, GB12)).toBe('November');
+    expect(formatWhen({ start: '2027-05-01', end: '2027-05-31' }, NOW, GB12)).toBe('May 2027');
+    expect(formatWhen({ start: '2027-02-01', end: '2027-02-28' }, NOW, GB12)).toBe('February 2027');
+  });
+
+  it('shows the year on single days outside the current year only', () => {
+    expect(formatWhen({ start: '2027-01-09T19:30' }, NOW, GB12)).toBe('Sat 9 Jan 2027 · 7:30 pm');
+    expect(formatWhen({ start: '2026-12-31' }, NOW, GB12)).toBe('Thu 31 Dec');
+    expect(formatWhen({ start: '2027-01-09' }, at(2027, 1, 2, 9), GB12)).toBe('Sat 9 Jan');
+    // Relative words need no year.
+    expect(formatWhen({ start: '2027-01-01' }, at(2026, 12, 31, 9), GB12)).toBe('Tomorrow');
+  });
+
+  it('says "Until …" for things on right now', () => {
+    expect(formatWhen({ start: '2026-09-30', end: '2027-01-05' }, NOW, GB12)).toBe('Until 5 Jan 2027');
+    expect(formatWhen({ start: '2026-12-20', end: '2027-01-05' }, at(2027, 1, 2, 9), GB12)).toBe('Until 5 Jan');
+    expect(formatWhen({ start: '2026-09-25', end: '2026-09-30' }, NOW, GB12)).toBe('Ends today');
+    expect(formatWhen({ start: '2026-09-25', end: '2026-10-01' }, NOW, GB12)).toBe('Until tomorrow');
+  });
+
+  it('formats timed spans', () => {
+    expect(formatWhen({ start: '2026-10-10T19:00', end: '2026-10-10T23:00' }, NOW, GB12)).toBe('Sat 10 Oct · 7 pm – 11 pm');
+    expect(formatWhen({ start: '2026-10-10T22:00', end: '2026-10-11T02:00' }, NOW, GB12)).toBe('Sat 10 Oct · 10 pm – 2 am');
+    expect(formatWhen({ start: '2026-10-10T10:00', end: '2026-10-12T18:00' }, NOW, GB12)).toBe('Sat 10 Oct 10 am – Mon 12 Oct 6 pm');
+  });
+
+  it('falls back to the source for an invalid When', () => {
+    expect(formatWhen({ start: 'someday', source: 'sometime soon' }, NOW)).toBe('sometime soon');
+  });
+});
+
+describe('whenToFields / whenFromFields', () => {
+  const roundTrip = (w: When) => whenFromFields(whenToFields(w)).when;
+  const fields = (f: Partial<WhenFields>): WhenFields => ({ startDate: '2026-10-12', endDate: '', timed: false, startTime: '', endTime: '', ...f });
+
+  it('round-trips every shape of When without losing anything', () => {
+    const shapes: When[] = [
+      { start: '2026-10-12' },
+      { start: '2026-10-12', end: '2026-10-14' },
+      { start: '2026-10-12T19:30' },
+      { start: '2026-10-12T19:00', end: '2026-10-12T23:00' },
+      { start: '2026-10-12T22:00', end: '2026-10-13T02:00' },
+      { start: '2026-10-12T19:00', end: '2026-10-13T19:00' },
+      { start: '2026-10-12T19:00', end: '2026-10-13T21:00' },
+      { start: '2026-10-12T19:00', end: '2026-10-14' },
+      { start: '2026-10-12', end: '2026-10-14T18:00' },
+    ];
+    for (const w of shapes) expect(roundTrip(w)).toEqual(w);
+  });
+
+  it('shows the time inputs for an all-day start with a timed end', () => {
+    expect(whenToFields({ start: '2026-10-12', end: '2026-10-14T18:00' })).toEqual({
+      startDate: '2026-10-12',
+      endDate: '2026-10-14',
+      timed: true,
+      startTime: '',
+      endTime: '18:00',
+    });
+    expect(whenToFields({ start: '2026-10-12T22:00', end: '2026-10-13T02:00' })).toMatchObject({ endDate: '', endTime: '02:00' });
+    expect(whenToFields(undefined)).toEqual({ startDate: '', endDate: '', timed: false, startTime: '', endTime: '' });
+  });
+
+  it('validates the fields', () => {
+    expect(whenFromFields(fields({ startDate: '' })).error).toBe('Pick a start date.');
+    expect(whenFromFields(fields({ endDate: '2026-10-11' })).error).toBe('The end date is before the start.');
+    expect(whenFromFields(fields({ timed: true })).error).toBe('Add a start time, or switch the time off.');
+    expect(whenFromFields(fields({ timed: true, endTime: '18:00' })).error).toBe('Add a start time, or switch the time off.');
+    expect(whenFromFields(fields({ timed: true, startTime: '19:00', endDate: '2026-10-12', endTime: '18:00' })).error).toBe('It ends before it starts.');
+    expect(whenFromFields(fields({ startDate: '2026-02-30' })).error).toBe('That date doesn’t look right.');
+    // Times are ignored while the switch is off; a late end time with no end date runs past midnight.
+    expect(whenFromFields(fields({ startTime: '19:00', endTime: '23:00' })).when).toEqual({ start: '2026-10-12' });
+    expect(whenFromFields(fields({ timed: true, startTime: '22:00', endTime: '01:00' })).when).toEqual({ start: '2026-10-12T22:00', end: '2026-10-13T01:00' });
+  });
+});
+
+describe('relativeWhen', () => {
+  it('describes how far away it is', () => {
+    expect(relativeWhen({ start: '2026-10-03' }, NOW)).toBe('in 3 days');
+    expect(relativeWhen({ start: '2026-10-01' }, NOW)).toBe('tomorrow');
+    expect(relativeWhen({ start: '2026-09-30T19:00' }, NOW)).toBe('today');
+    expect(relativeWhen({ start: '2026-09-30' }, NOW)).toBe('on now');
+    expect(relativeWhen({ start: '2026-09-25', end: '2026-10-05' }, NOW)).toBe('on now');
+    expect(relativeWhen({ start: '2026-09-29' }, NOW)).toBe('ended');
+    expect(relativeWhen({ start: '2026-10-20' }, NOW)).toBe('in 3 weeks');
+    expect(relativeWhen({ start: '2027-01-05' }, NOW)).toBe('in 3 months');
+    expect(relativeWhen({ start: 'nope' }, NOW)).toBe('');
+  });
+});

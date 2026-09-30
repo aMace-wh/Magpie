@@ -1,0 +1,334 @@
+/* ------------------------------------------------------------------ Share sheet */
+
+.ss-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.ss-summary .grow,
+.ss-toggle .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.ss-summary .t {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ss-summary .s,
+.ss-toggle .s {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.ss-thumb {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 26px;
+}
+
+.ss-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ss-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.ss-toggle .t {
+  font-weight: 650;
+}
+
+.ss-status {
+  min-height: 24px;
+  margin: 14px 0 4px;
+}
+
+.ss-status .hint {
+  margin: 0;
+}
+
+.ss-making {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.ss-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.ss-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.ss-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+  gap: 4px;
+}
+
+.ss-target {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 2px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ss-target:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.ss-target:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ss-glyph {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--glyph, var(--accent));
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  transition: transform 0.12s ease;
+}
+
+.ss-target:active:not(:disabled) .ss-glyph {
+  transform: scale(0.94);
+}
+
+/* Black X glyph needs an edge on dark backgrounds. */
+.ss-glyph.ss-x {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+
+.ss-glyph.ss-messenger {
+  background: linear-gradient(135deg, #00b2ff, #006aff 55%, #a334fa);
+}
+
+.ss-letter {
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.ss-letter.big {
+  font-size: 28px;
+  transform: translateY(2px);
+}
+
+.ss-letter.tiny {
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.ss-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ss-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.ss-actions .btn {
+  flex: 1 1 auto;
+}
+
+/* ------------------------------------------------------------------ Import (friend's share) */
+
+.imp-hero {
+  text-align: center;
+}
+
+.imp-hero h2 {
+  overflow-wrap: anywhere;
+}
+
+.imp-emoji {
+  position: relative;
+  font-size: 56px;
+  line-height: 1.15;
+}
+
+.imp-from {
+  position: relative;
+  margin: 6px auto 4px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.hero .imp-sub {
+  margin: 0 auto 16px;
+}
+
+.imp-update {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  margin: 0 0 16px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.imp-hero .row {
+  position: relative;
+  justify-content: center;
+}
+
+.imp-cols {
+  position: relative;
+  justify-content: center;
+  margin: 0 0 16px;
+}
+
+.imp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.imp-row {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.imp-row .t,
+.imp-row .s {
+  display: block;
+}
+
+.imp-row[aria-checked='false'] .grow,
+.imp-row[aria-checked='false'] .thumb-sm {
+  opacity: 0.5;
+}
+
+.imp-thumb {
+  position: relative;
+}
+
+/* The save's type, over its thumbnail. */
+.imp-badge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: var(--shadow);
+}
+
+.imp-row .check {
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.imp-state {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.imp-detail {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.imp-image {
+  width: 100%;
+  max-height: 220px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  object-fit: cover;
+}
+
+.imp-detail .imp-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.imp-detail .imp-line + .imp-line {
+  margin-top: 8px;
+}
+
+.imp-detail blockquote {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--surface-3);
+  color: var(--muted);
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.imp-own {
+  position: relative;
+  margin: -6px auto 14px;
+  font-size: 13px;
+  color: var(--muted);
+}

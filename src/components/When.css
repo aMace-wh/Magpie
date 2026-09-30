@@ -1,0 +1,202 @@
+/* ------------------------------------------------------------------ When badge */
+
+.when-badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  vertical-align: middle;
+}
+
+.when-badge svg {
+  flex: 0 0 auto;
+}
+
+.when-badge-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.when-badge.card {
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.when-badge.inline {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.when-badge.is-on {
+  background: var(--done-soft);
+  color: var(--done);
+}
+
+.when-badge.is-soon {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.when-badge.is-past {
+  background: transparent;
+  color: var(--faint);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* ------------------------------------------------------------------ When editor */
+
+.when-editor .when-suggest {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.when-editor .when-suggest > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.when-editor .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.when-editor .when-suggest-k {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.when-editor .when-suggest-v {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.when-editor .when-suggest-src {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.when-editor .when-suggest .btn {
+  flex: 0 0 auto;
+}
+
+.when-editor .when-quick {
+  margin-top: 12px;
+}
+
+.when-editor .when-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 340px) {
+  .when-editor .when-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.when-editor .when-field {
+  min-width: 0;
+}
+
+.when-editor .when-label-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.when-editor .when-label-row .label {
+  flex: 1;
+  min-width: 0;
+}
+
+.when-editor .when-optional {
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.when-editor .when-clear {
+  flex: 0 0 auto;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.when-editor input[type='date'],
+.when-editor input[type='time'] {
+  display: block;
+  min-width: 0;
+  min-height: 46px;
+  padding: 10px 12px;
+}
+
+/* iOS Safari sizes native date/time inputs to their content and centres the text. */
+@supports (-webkit-touch-callout: none) {
+  .when-editor input[type='date'],
+  .when-editor input[type='time'] {
+    -webkit-appearance: none;
+    appearance: none;
+    text-align: left;
+  }
+
+  .when-editor input::-webkit-date-and-time-value {
+    text-align: left;
+  }
+}
+
+.when-editor .when-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  font-weight: 650;
+}
+
+.when-editor .when-toggle > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.when-editor .when-status {
+  margin-top: 14px;
+}
+
+.when-editor .when-status.error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.when-editor .when-remove {
+  margin-top: 18px;
+}

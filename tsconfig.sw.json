@@ -1,0 +1,19 @@
+{
+  // Extra check of the service worker (src/sw.ts) with WebWorker globals only (no DOM), so it can't
+  // use window/document by mistake. tsconfig.json checks it too, as part of the app.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": []
+  },
+  "include": ["src/sw.ts"]
+}

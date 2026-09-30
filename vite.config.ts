@@ -13,6 +13,10 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      // Our own service worker (src/sw.ts) so it can receive POSTed shares; Workbox injects the precache list.
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       registerType: 'prompt',
       includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
       manifest: {
@@ -34,44 +38,29 @@ export default defineConfig({
           { src: 'pwa-512.png', sizes: '512x512', type: 'image/png' },
           { src: 'maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
-        // Lets the installed app appear in the Android / ChromeOS / Windows share sheet.
+        // Lets the installed app appear in the Android / ChromeOS / Windows share sheet — for links, text and
+        // Magpie share files. The service worker (src/sw.ts) handles the POST.
         share_target: {
-          action: './',
-          method: 'GET',
-          params: { title: 'title', text: 'text', url: 'url' },
+          action: './share-target',
+          method: 'POST',
+          enctype: 'multipart/form-data',
+          params: {
+            title: 'title',
+            text: 'text',
+            url: 'url',
+            files: [{ name: 'file', accept: ['application/json', '.json', '.magpie', 'text/plain'] }],
+          },
         },
+        // Opening a .magpie / .json share file with the installed app (desktop Chromium).
+        file_handlers: [{ action: './', accept: { 'application/json': ['.magpie', '.json'] } }],
         shortcuts: [
           { name: 'Save something', short_name: 'Save', url: './#/new', icons: [{ src: 'pwa-192.png', sizes: '192x192' }] },
           { name: 'Map', url: './#/map', icons: [{ src: 'pwa-192.png', sizes: '192x192' }] },
           { name: 'Journal', url: './#/journal', icons: [{ src: 'pwa-192.png', sizes: '192x192' }] },
         ],
       },
-      workbox: {
+      injectManifest: {
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
-        navigateFallback: 'index.html',
-        cleanupOutdatedCaches: true,
-        runtimeCaching: [
-          {
-            // Map tiles you've looked at stay available offline.
-            urlPattern: /^https:\/\/[a-z0-9.-]*tile\.openstreetmap\.org\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'map-tiles',
-              expiration: { maxEntries: 800, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // Thumbnails of saved links.
-            urlPattern: ({ request, sameOrigin }) => !sameOrigin && request.destination === 'image',
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'thumbnails',
-              expiration: { maxEntries: 600, maxAgeSeconds: 60 * 60 * 24 * 90 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-        ],
       },
       devOptions: { enabled: false },
     }),
