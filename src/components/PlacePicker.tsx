@@ -174,6 +174,7 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
           enterKeyHint="search"
           value={query}
           autoFocus
+          data-autofocus
           aria-label="Search places"
           placeholder="Search a place, address, or paste coordinates"
           onChange={(e) => setQuery(e.target.value)}

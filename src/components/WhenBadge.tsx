@@ -28,7 +28,8 @@ export function WhenBadge({ when, now, variant = 'card' }: Props) {
   const relative = relativeWhen(w, at);
 
   return (
-    <span className={`when-badge ${variant} is-${tone}`} title={relative ? `${label} (${relative})` : label}>
+    // "when-badge--card", not "card": that's the save card's own class.
+    <span className={`when-badge when-badge--${variant} is-${tone}`} title={relative ? `${label} (${relative})` : label}>
       <CalendarDays size={variant === 'card' ? 12 : 14} aria-hidden />
       <span className="when-badge-text">{text}</span>
       {relative && status !== 'ongoing' && <span className="sr-only">, {relative}</span>}

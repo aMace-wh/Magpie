@@ -1,11 +1,14 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Check, ExternalLink } from 'lucide-react';
+import { Check, Copy, ExternalLink, Smartphone } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useToast } from '../components/Toast';
 import { hostOf, safeUrl } from '../lib/classify';
 import { plural } from '../lib/format';
+import { isInAppBrowser, isIos, isStandalone } from '../lib/install';
 import { takeInboxFile } from '../lib/receive';
 import { navigate } from '../lib/router';
+import { useSettings } from '../lib/settings';
+import { copyText } from '../lib/shareSheet';
 import { decodeShare, payloadEmoji, payloadTitle, readShareFile, type SharedItemV2, type SharedPayloadV2 } from '../lib/share';
 import { flag, placeLabel, whenLabel } from '../lib/social';
 import { countSelection, importShare, planImport, type ImportPreview, type ImportResult, type ImportRowStatus } from '../lib/transfer';
@@ -52,7 +55,7 @@ export function ImportScreen({ payload }: { payload: string }) {
 
   if (state.error) return <ShareError />;
   if (!state.data) return <Loading />;
-  return <ImportView data={state.data} />;
+  return <ImportView data={state.data} link={window.location.href} />;
 }
 
 /** Import preview for a shared file (opened with the app, picked in Settings, or received from the share sheet). */
@@ -115,9 +118,10 @@ function rowMeta(s: SharedItemV2): string {
   return parts.join(' · ');
 }
 
-function RowThumb({ s }: { s: SharedItemV2 }) {
+// Pictures in a share come from addresses the sender chose, so they only load with link previews on.
+function RowThumb({ s, images }: { s: SharedItemV2; images: boolean }) {
   const [broken, setBroken] = useState(false);
-  const src = broken ? undefined : safeUrl(s.i);
+  const src = broken || !images ? undefined : safeUrl(s.i);
   const emoji = TYPE_INFO[s.t].emoji;
   return (
     <span className="thumb-sm imp-thumb">
@@ -148,11 +152,13 @@ export function importButtonLabel(data: SharedPayloadV2, preview: ImportPreview 
   }
   const { new: added, update: updated, have } = countSelection(preview, data.items.length, selected);
   if (!added && !updated && !have) return 'Add to my Magpie';
-  if (added && updated) return `Add ${added} new · update ${updated}`;
-  if (added) return `Add ${added} to my Magpie`;
+  if (added && updated) return `Add ${added.toLocaleString()} new · update ${updated.toLocaleString()}`;
+  if (added) return `Add ${added.toLocaleString()} to my Magpie`;
   const many = data.kind === 'library';
-  if (preview?.existing || Object.keys(preview?.existingByKey ?? {}).length) return many ? 'Update my collections' : 'Update my collection';
-  if (updated) return `Update ${plural(updated, 'save')}`;
+  const existing = !!preview?.existing || Object.keys(preview?.existingByKey ?? {}).length > 0;
+  if (updated) return existing ? (many ? 'Update my collections' : 'Update my collection') : `Update ${plural(updated, 'save')}`;
+  // Everything picked is already saved.
+  if (existing) return many ? 'Open my collections' : 'Open my collection';
   return many ? 'Add the collections' : 'Add the collection';
 }
 
@@ -171,9 +177,37 @@ function resultMessage(res: ImportResult, data: SharedPayloadV2): string {
   return text[0].toUpperCase() + text.slice(1);
 }
 
-/** Preview of a decoded share with checkboxes, and "Add N to my Magpie". */
-export function ImportView({ data }: { data: SharedPayloadV2 }) {
+/**
+ * On an iPhone the Home Screen app keeps its saves apart from Safari, and chat apps' built-in browsers keep their
+ * own: a share opened there wouldn't reach your Magpie. Offers the way across (copy the link, paste it with +).
+ */
+function ElsewhereNote({ link }: { link: string }) {
   const toast = useToast();
+  const [where] = useState(() => (isInAppBrowser() ? 'app' : isIos() && !isStandalone() ? 'safari' : undefined));
+  if (!where) return null;
+  const copy = async () => toast((await copyText(link)) ? 'Link copied — paste it into Magpie with the + button' : "Couldn't copy the link");
+  return (
+    <div className="imp-elsewhere" role="note">
+      <Smartphone size={18} aria-hidden />
+      <div className="grow">
+        <strong>{where === 'app' ? 'Opened inside another app?' : 'Using Magpie from your Home Screen?'}</strong>
+        <span>
+          {where === 'app'
+            ? 'Saves added here stay in this app’s browser. Open the link in Safari or Chrome — or copy it and paste it into Magpie with the + button.'
+            : 'It keeps its own saves, apart from Safari. Copy this link, then open Magpie and paste it with the + button.'}
+        </span>
+      </div>
+      <button type="button" className="btn small outline" onClick={copy}>
+        <Copy size={14} aria-hidden /> Copy link
+      </button>
+    </div>
+  );
+}
+
+/** Preview of a decoded share with checkboxes, and "Add N to my Magpie". `link`: the share link it was opened from. */
+export function ImportView({ data, link }: { data: SharedPayloadV2; link?: string }) {
+  const toast = useToast();
+  const { previews } = useSettings();
   const preview = useLiveQuery(() => planImport(data), [data]);
   const keys = useMemo(() => data.items.map((_, i) => String(i)), [data]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(keys));
@@ -223,7 +257,8 @@ export function ImportView({ data }: { data: SharedPayloadV2 }) {
       else navigate('/collections', { replace: true });
     } catch (e) {
       setBusy(false);
-      toast(`Couldn't add it: ${(e as Error).message}`);
+      console.error('Import failed', e);
+      toast("Couldn't add it — please try again.");
     }
   };
 
@@ -251,18 +286,25 @@ export function ImportView({ data }: { data: SharedPayloadV2 }) {
           </div>
         )}
         {!single && n === 0 && <p className="imp-sub">This share is empty.</p>}
-        <div className="row">
-          <button className="btn outline" onClick={() => navigate('/', { replace: true })}>
-            No thanks
-          </button>
+        {data.total !== undefined && (
+          <p className="imp-sub">
+            It had {data.total.toLocaleString()} saves — these are the first {n.toLocaleString()}. Ask {sender ?? 'your friend'} to send the rest in another
+            share.
+          </p>
+        )}
+        {link && <ElsewhereNote link={link} />}
+        <div className="row imp-actions">
           <button className="btn fancy" onClick={accept} disabled={busy || !preview || count === 0}>
             {busy && <span className="spinner" aria-hidden />}
             {label}
           </button>
+          <button className="btn outline" onClick={() => navigate('/', { replace: true })}>
+            No thanks
+          </button>
         </div>
       </section>
 
-      {single && first && <ItemDetail s={first} sender={sender} />}
+      {single && first && <ItemDetail s={first} sender={sender} images={previews} />}
 
       {!single && n > 0 && (
         <>
@@ -288,7 +330,7 @@ export function ImportView({ data }: { data: SharedPayloadV2 }) {
                   <span className={on ? 'check on' : 'check'} aria-hidden>
                     <Check size={15} strokeWidth={3} />
                   </span>
-                  <RowThumb s={s} />
+                  <RowThumb s={s} images={previews} />
                   <span className="grow">
                     <span className="t">{s.n}</span>
                     <span className="s">{rowMeta(s)}</span>
@@ -305,12 +347,12 @@ export function ImportView({ data }: { data: SharedPayloadV2 }) {
 }
 
 /** Enough of a single shared save to recognise it: the original link, place, date and post text. */
-function ItemDetail({ s, sender }: { s: SharedItemV2; sender?: string }) {
+function ItemDetail({ s, sender, images }: { s: SharedItemV2; sender?: string; images: boolean }) {
   const url = safeUrl(s.u);
   const place = placeLabel(s.p);
   const when = whenLabel(s.w);
   const [broken, setBroken] = useState(false);
-  const image = broken ? undefined : safeUrl(s.i);
+  const image = broken || !images ? undefined : safeUrl(s.i);
   // For a note the note is the content; for anything else it's the sender's own comment.
   const text = s.x ?? s.ds ?? (s.t === 'note' ? s.d : undefined);
   const clipped = text && text.length > 600 ? `${text.slice(0, 600).trimEnd()}…` : text;
@@ -319,7 +361,7 @@ function ItemDetail({ s, sender }: { s: SharedItemV2; sender?: string }) {
   const verdict = [s.st === 'done' ? TYPE_INFO[s.t].done : '', rating ? '★'.repeat(rating) : ''].filter(Boolean).join(' · ');
   return (
     <div className="imp-detail">
-      {image && <img className="imp-image" src={image} alt="" referrerPolicy="no-referrer" onError={() => setBroken(true)} />}
+      {image && <img className="imp-image" src={image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setBroken(true)} />}
       <div className="imp-line">
         <span aria-hidden>{TYPE_INFO[s.t].emoji}</span>
         <span>

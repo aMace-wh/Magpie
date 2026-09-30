@@ -1,13 +1,32 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, Download, Monitor, Moon, Smartphone, Sparkles, Sun, Trash2, Upload } from 'lucide-react';
-import { useRef } from 'react';
+import {
+  ArrowLeft,
+  CalendarPlus,
+  Download,
+  FileInput,
+  Link2,
+  Monitor,
+  Moon,
+  Share2,
+  Smartphone,
+  Sparkles,
+  Sun,
+  Trash2,
+  Upload,
+  UserRound,
+} from 'lucide-react';
+import { useId, useMemo, useRef, useState, type FormEvent } from 'react';
+import { ShareSheet } from '../components/ShareSheet';
 import { useToast } from '../components/Toast';
+import { calendarEventFromItem, downloadIcs, toIcs, type CalendarEvent } from '../lib/calendar';
 import { clearAll, db } from '../lib/db';
 import { plural } from '../lib/format';
 import { promptInstall, useInstall } from '../lib/install';
-import { goBack } from '../lib/router';
+import { setPendingImport } from '../lib/pendingImport';
+import { goBack, navigate } from '../lib/router';
 import { addSampleData } from '../lib/samples';
 import { setSettings, useSettings, type Settings } from '../lib/settings';
+import { parseShareInput } from '../lib/share';
 import { exportBackup, importBackup } from '../lib/transfer';
 
 export function SettingsScreen() {
@@ -15,7 +34,14 @@ export function SettingsScreen() {
   const settings = useSettings();
   const install = useInstall();
   const file = useRef<HTMLInputElement>(null);
-  const counts = useLiveQuery(async () => ({ items: await db.items.count(), collections: await db.collections.count() }), []);
+  const shareFile = useRef<HTMLInputElement>(null);
+  const [link, setLink] = useState('');
+  const [sharing, setSharing] = useState(false);
+  const nameId = useId();
+  const linkId = useId();
+  const items = useLiveQuery(() => db.items.orderBy('createdAt').reverse().toArray(), []);
+  const collections = useLiveQuery(() => db.collections.toArray(), []);
+  const events = useMemo(() => (items ?? []).map(calendarEventFromItem).filter((e): e is CalendarEvent => !!e), [items]);
 
   const download = async () => {
     const backup = await exportBackup();
@@ -40,6 +66,30 @@ export function SettingsScreen() {
     if (!confirm('Delete every save and collection on this device? This cannot be undone. Consider downloading a backup first.')) return;
     await clearAll();
     toast('Everything deleted');
+  };
+
+  const shareLibrary = () => {
+    if (!items?.length) return toast('Save something first, then share it.');
+    setSharing(true);
+  };
+
+  const openLink = (e: FormEvent) => {
+    e.preventDefault();
+    const payload = parseShareInput(link);
+    if (!payload) return toast("That doesn't look like a Magpie link");
+    setLink('');
+    navigate(`/import/${payload}`);
+  };
+
+  const openShareFile = (f: File) => {
+    setPendingImport(f);
+    navigate('/import-file');
+  };
+
+  const exportCalendar = () => {
+    if (!events.length) return toast('No saves with a date yet.');
+    const ok = downloadIcs('magpie-events', toIcs(events, { name: 'Magpie' }));
+    toast(ok ? `Calendar file saved — ${plural(events.length, 'event')}` : "Couldn't make the calendar file");
   };
 
   const themes: { id: Settings['theme']; label: string; icon: typeof Sun }[] = [
@@ -85,7 +135,7 @@ export function SettingsScreen() {
 
       <h2 className="section-title">Appearance</h2>
       <div className="settings-group">
-        <div className="setting">
+        <div className="setting wraps">
           <div className="grow">
             <div className="t">Theme</div>
           </div>
@@ -99,21 +149,107 @@ export function SettingsScreen() {
         </div>
       </div>
 
+      <h2 className="section-title">Share with friends</h2>
+      <div className="settings-group">
+        <div className="setting setting-field">
+          <UserRound size={20} aria-hidden />
+          <div className="grow">
+            <label className="t" htmlFor={nameId}>
+              Your name
+            </label>
+            <div className="s" id={`${nameId}-hint`}>
+              Shown to friends when you share
+            </div>
+            <input
+              id={nameId}
+              className="input"
+              type="text"
+              autoComplete="given-name"
+              maxLength={40}
+              placeholder="e.g. Sam"
+              aria-describedby={`${nameId}-hint`}
+              value={settings.name}
+              onChange={(e) => setSettings({ name: e.target.value })}
+              onBlur={(e) => setSettings({ name: e.target.value.trim() })}
+            />
+          </div>
+        </div>
+        <button className="setting" onClick={shareLibrary}>
+          <Share2 size={20} />
+          <div className="grow">
+            <div className="t">Share my library</div>
+            <div className="s">
+              {items?.length
+                ? `Send all ${plural(items.length, 'save')} with a link or a file — WhatsApp, Telegram, email and more.`
+                : 'Send your saves with a link or a file — WhatsApp, Telegram, email and more.'}
+            </div>
+          </div>
+        </button>
+      </div>
+
+      <h2 className="section-title">Add a friend's share</h2>
+      <div className="settings-group">
+        <button className="setting" onClick={() => shareFile.current?.click()}>
+          <FileInput size={20} />
+          <div className="grow">
+            <div className="t">Open a share file</div>
+            <div className="s">A .magpie.json or .txt file a friend sent you. You'll see what's inside before adding anything.</div>
+          </div>
+        </button>
+        <form className="setting setting-field" onSubmit={openLink}>
+          <Link2 size={20} aria-hidden />
+          <div className="grow">
+            <label className="t" htmlFor={linkId}>
+              Paste a share link
+            </label>
+            <div className="field-row">
+              <input
+                id={linkId}
+                className="input"
+                type="text"
+                inputMode="url"
+                autoComplete="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                placeholder="https://…#/import/…"
+                value={link}
+                onChange={(e) => setLink(e.target.value)}
+              />
+              <button className="btn primary" type="submit" disabled={!link.trim()}>
+                Open
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+      <input
+        ref={shareFile}
+        type="file"
+        accept=".json,.magpie,.txt,application/json,text/plain"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (f) openShareFile(f);
+        }}
+      />
+
       <h2 className="section-title">Smart features</h2>
       <div className="settings-group">
         <div className="setting">
           <div className="grow">
-            <div className="t">Fetch link previews</div>
+            <div className="t">Link previews and place details</div>
             <div className="s">
-              Gets titles and images for links you save. The link (only) is sent to noembed.com / microlink.io. Sorting and tagging always
-              happen on your device.
+              Gets titles and images for links you save (only the link is sent to noembed.com / microlink.io) and shows the pictures in a
+              friend's share before you add it. Fills in the city and country of saved places in the background (only the coordinates
+              are sent to OpenStreetMap Nominatim). Sorting and tagging always happen on your device.
             </div>
           </div>
           <button
             className="switch"
             role="switch"
             aria-checked={settings.previews}
-            aria-label="Fetch link previews"
+            aria-label="Link previews and place details"
             onClick={() => setSettings({ previews: !settings.previews })}
           />
         </div>
@@ -121,7 +257,9 @@ export function SettingsScreen() {
 
       <h2 className="section-title">Your data</h2>
       <p className="hint" style={{ margin: '-4px 0 10px' }}>
-        {counts ? `${plural(counts.items, 'save')} and ${plural(counts.collections, 'collection')}, stored only on this device.` : ' '}
+        {items && collections
+          ? `${plural(items.length, 'save')} and ${plural(collections.length, 'collection')}, stored only on this device.`
+          : ' '}
       </p>
       <div className="settings-group">
         <button className="setting" onClick={download}>
@@ -136,6 +274,17 @@ export function SettingsScreen() {
           <div className="grow">
             <div className="t">Restore from backup</div>
             <div className="s">Merges a backup file into this library.</div>
+          </div>
+        </button>
+        <button className="setting" onClick={exportCalendar}>
+          <CalendarPlus size={20} />
+          <div className="grow">
+            <div className="t">Export dated saves to calendar (.ics)</div>
+            <div className="s">
+              {events.length
+                ? `${plural(events.length, 'save')} with a date, for Google, Apple or Outlook Calendar.`
+                : 'Saves with a date show up here, for Google, Apple or Outlook Calendar.'}
+            </div>
           </div>
         </button>
         <button
@@ -173,6 +322,10 @@ export function SettingsScreen() {
       <p className="hint">
         Magpie v{__APP_VERSION__} — works offline, no account needed. Map data © OpenStreetMap contributors.
       </p>
+
+      {items && items.length > 0 && (
+        <ShareSheet open={sharing} onClose={() => setSharing(false)} target={{ kind: 'library', items, collections: collections ?? [] }} />
+      )}
     </div>
   );
 }

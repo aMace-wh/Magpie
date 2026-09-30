@@ -1,11 +1,13 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { addCollection, addItem, buildItem, db, deleteCollection, markDone, markTodo, saveShared, toggleItemInCollection, updateItem } from './db';
+import { groupByCountry } from './location';
 import { addSampleData } from './samples';
-import { decodeShare, encodeShare, readShareFile, shareCollection, shareItem, shareLibrary, shareUrl, toShared, type SharedPayloadV2 } from './share';
+import { decodeShare, encodeShare, readShareFile, shareCollection, shareItem, shareLibrary, shareUrl, shortHash, toShared, type SharedPayloadV2 } from './share';
 import { describeRules, itemsInCollection, matchesRules } from './smart';
 import { countSelection, exportBackup, importBackup, importShare, importSharedCollection, planImport, urlKey } from './transfer';
 import type { Collection, Item } from './types';
+import { whenStatus } from './when';
 import { importButtonLabel } from '../screens/ImportScreen';
 
 beforeEach(async () => {
@@ -68,10 +70,40 @@ describe('library', () => {
     await addSampleData();
     expect(await db.items.count()).toBeGreaterThan(10);
     const cols = await db.collections.toArray();
+    expect(cols).toHaveLength(3);
     const dinner = cols.find((c) => c.name === 'Dinner ideas')!;
     const items = await db.items.toArray();
     expect(itemsInCollection(items, dinner).length).toBeGreaterThan(0);
-    expect(items.filter((i) => i.place).length).toBeGreaterThanOrEqual(6);
+    expect(items.filter((i) => i.place).length).toBeGreaterThanOrEqual(8);
+    // Only the fields that belong on a save.
+    expect(items.some((i) => 'reasons' in i || 'confidence' in i || 'alternatives' in i)).toBe(false);
+  });
+
+  it('sample places have full details and group into three countries', async () => {
+    await addSampleData();
+    const items = await db.items.toArray();
+    for (const i of items.filter((x) => x.place)) {
+      expect(i.place, i.title).toMatchObject({ name: expect.any(String), city: expect.any(String), country: expect.any(String), countryCode: expect.stringMatching(/^[A-Z]{2}$/) });
+    }
+    expect(groupByCountry(items).map((g) => g.code).sort()).toEqual(['GB', 'JP', 'PT']);
+  });
+
+  it('sample data has events (coming up, on now, been) and original captions', async () => {
+    await addSampleData();
+    const items = await db.items.toArray();
+    const events = items.filter((i) => i.type === 'event');
+    expect(events).toHaveLength(3);
+    expect(events.every((e) => e.when && e.place)).toBe(true);
+    expect(events.map((e) => whenStatus(e.when!)).sort()).toEqual(['ongoing', 'past', 'upcoming']);
+    const past = events.find((e) => whenStatus(e.when!) === 'past')!;
+    expect(past).toMatchObject({ status: 'done', rating: expect.any(Number), review: expect.any(String) });
+    const jazz = events.find((e) => whenStatus(e.when!) === 'upcoming')!;
+    expect(jazz.when!.start).toMatch(/T\d{2}:\d{2}$/);
+    const lisbon = (await db.collections.toArray()).find((c) => c.name === 'Weekend in Lisbon')!;
+    expect(jazz.collectionIds).toContain(lisbon.id);
+    const captions = items.filter((i) => i.sharedText);
+    expect(captions.length).toBeGreaterThanOrEqual(2);
+    expect(items.find((i) => i.title.includes('orzo'))?.sharedText).toMatch(/#pasta/);
   });
 });
 
@@ -245,8 +277,11 @@ describe('importShare: collections', () => {
     await importShare(p);
     await addItem({ title: 'Graça', type: 'place', url: 'https://maps.example/graca' });
     preview = await planImport(shareCollection(lisbon, [...samItems(), buildItem({ title: 'Graça!', type: 'place', url: 'https://maps.example/graca/' }), buildItem({ title: 'New', type: 'link' })], { from: 'Sam' }));
-    expect(preview.rows).toEqual(['update', 'update', 'update', 'have', 'new']);
+    // Unchanged since the last import: already saved, nothing to update.
+    expect(preview.rows).toEqual(['have', 'have', 'have', 'have', 'new']);
     expect(preview.existing?.name).toBe('Weekend in Lisbon');
+    const renamed = samItems().map((i) => (i.title === 'Fado night' ? { ...i, title: 'Fado night at Tasca' } : i));
+    expect((await planImport(shareCollection(lisbon, renamed, { from: 'Sam' }))).rows).toEqual(['have', 'update', 'have']);
   });
 
   it('recognises your own collection', async () => {
@@ -286,14 +321,16 @@ describe('importShare: libraries', () => {
     const events: Collection = { ...lisbon, id: 'sam-c2', name: 'Gigs', emoji: '🎸' };
     tarts.collectionIds = [lisbon.id];
     fado.collectionIds = [lisbon.id, events.id];
-    const p: SharedPayloadV2 = { ...shareLibrary([tarts, fado, note], [lisbon, events], { from: 'Sam' }), shareId: 'l:samsphone' };
+    const opts = { from: 'Sam', includePersonal: true };
+    const p: SharedPayloadV2 = { ...shareLibrary([tarts, fado, note], [lisbon, events], opts), shareId: 'l:samsphone' };
     const res = await importShare(p);
     expect(res.added).toBe(3);
     expect(res.collectionIds).toHaveLength(3);
     expect(res.collectionId).toBeUndefined();
     const cols = await db.collections.toArray();
     expect(cols.map((c) => c.name).sort()).toEqual(['Gigs', "Sam's saves", 'Weekend in Lisbon']);
-    expect(cols.map((c) => c.from?.shareId).sort()).toEqual(['l:samsphone:0', 'l:samsphone:1', 'l:samsphone:_']);
+    // Filed by Sam's own collections (so they match the same collections shared on their own); loose saves by the library.
+    expect(cols.map((c) => c.from?.shareId).sort()).toEqual([`cf:${shortHash('sam-c1')}`, `cf:${shortHash('sam-c2')}`, 'l:samsphone:_'].sort());
     const byName = (n: string) => cols.find((c) => c.name === n)!.id;
     const saved = await db.items.toArray();
     expect(saved.find((i) => i.title === 'Fado night')?.collectionIds.sort()).toEqual([byName('Weekend in Lisbon'), byName('Gigs')].sort());
@@ -303,7 +340,7 @@ describe('importShare: libraries', () => {
     expect(Object.keys(preview.existingByKey).sort()).toEqual(['0', '1', '_']);
 
     const extra = buildItem({ title: 'Tram 28', type: 'place', collectionIds: [events.id] });
-    const res2 = await importShare({ ...shareLibrary([tarts, fado, note, extra], [lisbon, events], { from: 'Sam' }), shareId: 'l:samsphone' });
+    const res2 = await importShare({ ...shareLibrary([tarts, fado, note, extra], [lisbon, events], opts), shareId: 'l:samsphone' });
     expect(res2).toMatchObject({ added: 1, updated: 0, skipped: 3 });
     expect(await db.collections.count()).toBe(3);
     expect((await db.items.toArray()).find((i) => i.title === 'Tram 28')?.collectionIds).toEqual([byName('Gigs')]);
@@ -464,7 +501,7 @@ describe('importShare: saves with the same title', () => {
     await markDone(aaa.id, 5, 'So good');
 
     const p = col1([reel('AAA'), reel('BBB')]);
-    expect((await planImport(p)).rows).toEqual(['update', 'new']);
+    expect((await planImport(p)).rows).toEqual(['have', 'new']);
     const res = await importShare(p);
     expect(res).toMatchObject({ added: 1, updated: 0, skipped: 1, collectionId: first.collectionId });
     expect(await urls()).toEqual(['https://www.instagram.com/reel/AAA/', 'https://www.instagram.com/reel/BBB/']);
@@ -479,8 +516,8 @@ describe('importShare: saves with the same title', () => {
     await importShare(col1([reel('1', 'Film on Letterboxd')]));
     const p = col1([reel('2', 'Film on Letterboxd'), reel('1', 'Film on Letterboxd')]);
     const preview = await planImport(p);
-    expect(preview.rows).toEqual(['new', 'update']);
-    expect(preview.counts).toEqual({ new: 1, update: 1, have: 0 });
+    expect(preview.rows).toEqual(['new', 'have']);
+    expect(preview.counts).toEqual({ new: 1, update: 0, have: 1 });
     const res = await importShare(p);
     expect(res).toMatchObject({ added: 1, updated: 0, skipped: 1 });
     expect(await urls()).toEqual(['https://www.instagram.com/reel/1/', 'https://www.instagram.com/reel/2/']);
@@ -550,7 +587,7 @@ describe('importShare: picking some saves agrees with the preview', () => {
   it('matches over the whole share, so an unticked row still claims its earlier save', async () => {
     await importShare(col1([{ t: 'event', n: 'Fado night', u: 'https://tickets.example/fado' }]));
     const p = col1([{ t: 'event', n: 'Fado night' }, { t: 'event', n: 'Fado night', u: 'https://tickets.example/fado' }]);
-    expect((await planImport(p)).rows).toEqual(['new', 'update']);
+    expect((await planImport(p)).rows).toEqual(['new', 'have']);
     const res = await importShare(p, { itemIds: ['0'] });
     expect(res).toMatchObject({ added: 1, updated: 0 });
     expect(await urls()).toEqual(['https://tickets.example/fado', undefined]);
@@ -587,20 +624,25 @@ describe('import button label', () => {
     expect(importButtonLabel(p, undefined, all(p))).toBe('Add 10 to my Magpie');
   });
 
-  it('mentions updates, and says "Update my collection" when nothing is new', async () => {
+  it('mentions updates, says "Update my collection" when nothing is new, and "Open my collection" when nothing changed', async () => {
     await importShare(col1([reel('A'), reel('B')]));
     const p = col1([reel('A', 'Renamed'), reel('B'), reel('C')]);
     const preview = await planImport(p);
-    expect(preview.rows).toEqual(['update', 'update', 'new']);
-    expect(importButtonLabel(p, preview, all(p))).toBe('Add 1 new · update 2');
+    expect(preview.rows).toEqual(['update', 'have', 'new']);
+    expect(importButtonLabel(p, preview, all(p))).toBe('Add 1 new · update 1');
     expect(importButtonLabel(p, preview, new Set(['0']))).toBe('Update my collection');
+    expect(importButtonLabel(p, preview, new Set(['1']))).toBe('Open my collection');
   });
 
   it('labels single saves', async () => {
-    const item = shareItem(samItems()[0], { from: 'Sam' });
+    const [tarts] = samItems();
+    const item = shareItem(tarts, { from: 'Sam' });
     expect(importButtonLabel(item, await planImport(item), all(item))).toBe('Add to my Magpie');
     await importShare(item);
-    expect(importButtonLabel(item, await planImport(item), all(item))).toBe('Update my save');
+    // Nothing changed since: it's just there.
+    expect(importButtonLabel(item, await planImport(item), all(item))).toBe('Open my save');
+    const changedItem = shareItem({ ...tarts, title: 'Pastéis (the originals)' }, { from: 'Sam' });
+    expect(importButtonLabel(changedItem, await planImport(changedItem), all(changedItem))).toBe('Update my save');
     await db.items.clear();
     await addItem({ title: 'Mine', type: 'place', url: 'https://pasteisdebelem.pt' });
     expect(importButtonLabel(item, await planImport(item), all(item))).toBe('Open my save');
@@ -635,5 +677,188 @@ describe('importShare: coordinates', () => {
     expect(await place('text')).toEqual({ lat: 38.7, lng: -9.14 });
     expect(await place('edge')).toEqual({ lat: 90, lng: -180 });
     for (const id of ['nan', 'inf', 'exp', 'far', 'none']) expect(await place(id)).toBeUndefined();
+  });
+});
+
+describe('importShare: opening the same share again keeps your edits', () => {
+  const cafe = (over: Partial<SharedPayloadV2['items'][number]> = {}): SharedPayloadV2['items'][number] => ({
+    t: 'place',
+    n: 'Cafe',
+    u: 'https://cafe.example/',
+    g: ['coffee'],
+    p: { lat: 38.7, lng: -9.1 },
+    w: { start: '2026-11-01' },
+    ...over,
+  });
+  const share = (items: SharedPayloadV2['items']): SharedPayloadV2 => ({ v: 2, kind: 'collection', shareId: 'c:trip1', from: 'Sam', name: 'Trip', items });
+
+  it("doesn't undo a rename, a new date, place details or a removed tag when nothing changed on your friend's side", async () => {
+    await importShare(share([cafe()]));
+    const [saved] = await db.items.toArray();
+    await updateItem(saved.id, {
+      title: 'My cafe name',
+      when: { start: '2026-11-05' },
+      place: { lat: 38.7, lng: -9.1, city: 'Lisbon', country: 'Portugal', countryCode: 'PT' },
+      tags: [],
+    });
+
+    const again = share([cafe()]);
+    expect((await planImport(again)).rows).toEqual(['have']);
+    const res = await importShare(again);
+    expect(res).toMatchObject({ added: 0, updated: 0, skipped: 1 });
+    expect(await db.items.get(saved.id)).toMatchObject({
+      title: 'My cafe name',
+      when: { start: '2026-11-05' },
+      place: { lat: 38.7, lng: -9.1, city: 'Lisbon', country: 'Portugal', countryCode: 'PT' },
+      tags: [],
+    });
+  });
+
+  it('applies what your friend changed since, and adds details to the same spot without losing yours', async () => {
+    await importShare(share([cafe()]));
+    const [saved] = await db.items.toArray();
+    await updateItem(saved.id, { title: 'My cafe name', place: { lat: 38.7, lng: -9.1, city: 'Lisbon', countryCode: 'PT' } });
+
+    const res = await importShare(share([cafe({ w: { start: '2026-11-08' }, g: ['coffee', 'brunch'], p: { lat: 38.7, lng: -9.1, name: 'Cafe Sol', city: 'Lisboa' } })]));
+    expect(res).toMatchObject({ updated: 1 });
+    const after = await db.items.get(saved.id);
+    expect(after).toMatchObject({ title: 'My cafe name', when: { start: '2026-11-08' }, tags: ['coffee', 'brunch'] });
+    expect(after?.place).toEqual({ lat: 38.7, lng: -9.1, city: 'Lisbon', countryCode: 'PT', name: 'Cafe Sol' });
+
+    // Moved to a different spot: the friend's place wins.
+    await importShare(share([cafe({ w: { start: '2026-11-08' }, g: ['coffee', 'brunch'], p: { lat: 41.1, lng: -8.6, city: 'Porto' } })]));
+    expect((await db.items.get(saved.id))?.place).toEqual({ lat: 41.1, lng: -8.6, city: 'Porto' });
+  });
+
+  it('keeps the record of what was shared in backups', async () => {
+    await importShare(share([cafe(), { t: 'note', n: 'Pack sunscreen', k: 'abc123' }]));
+    const backup = await exportBackup();
+    await db.items.clear();
+    await importBackup(JSON.parse(JSON.stringify(backup)));
+    const items = await db.items.toArray();
+    expect(items.find((i) => i.title === 'Cafe')?.from?.shared?.tags).toEqual(['coffee']);
+    expect(items.find((i) => i.title === 'Pack sunscreen')?.from?.key).toBe('abc123');
+    await importBackup({ ...backup, items: [{ ...backup.items[0], from: { at: 1, key: 'NOT OK!', shared: { sig: { title: 'x y', __proto__: 'a' }, tags: 'nope' } } }] });
+    const bad = await db.items.get(backup.items[0].id);
+    expect(bad?.from).toEqual({ at: 1, shared: { sig: {}, tags: [] } });
+  });
+});
+
+describe('importShare: the same friend sharing things different ways', () => {
+  const trip: Collection = { ...lisbon, id: 'sam-trip', name: 'Weekend in Lisbon' };
+  const tripItems = () => {
+    const items = samItems();
+    for (const i of items) i.collectionIds = [trip.id];
+    return items;
+  };
+
+  it("merges a library share into the collection added from Sam's collection link before (and says so)", async () => {
+    const items = tripItems();
+    const first = await importShare(shareCollection(trip, items, { from: 'Sam' }));
+    const other: Collection = { ...lisbon, id: 'sam-other', name: 'Other' };
+    const extra = buildItem({ title: 'Tram 28', type: 'place', url: 'https://tram.example/28', collectionIds: [other.id] });
+    const lib: SharedPayloadV2 = { ...shareLibrary([...items, extra], [other, trip], { from: 'Sam', includePersonal: true }), shareId: 'l:samsphone' };
+
+    const preview = await planImport(lib);
+    const tripKey = lib.collections!.find((c) => c.name === 'Weekend in Lisbon')!.key;
+    expect(preview.existingByKey[tripKey]?.id).toBe(first.collectionId);
+    expect(preview.rows).toEqual(['have', 'have', 'have', 'new']);
+
+    await importShare(lib);
+    const names = (await db.collections.toArray()).map((c) => c.name).sort();
+    expect(names).toEqual(['Other', 'Weekend in Lisbon']);
+    // The note without a link isn't added twice either.
+    expect(await db.items.count()).toBe(4);
+    expect((await colItems(first.collectionId!)).map((i) => i.title).sort()).toEqual(['Fado night', 'Pack a jumper', 'Pastéis de Belém']);
+  });
+
+  it('works the other way round, and when the order of collections changes', async () => {
+    const items = tripItems();
+    const other: Collection = { ...lisbon, id: 'sam-other', name: 'Other' };
+    await importShare({ ...shareLibrary(items, [trip], { from: 'Sam', includePersonal: true }), shareId: 'l:samsphone' });
+    const res = await importShare({ ...shareLibrary(items, [other, trip], { from: 'Sam', includePersonal: true }), shareId: 'l:samsphone' });
+    expect(res.added).toBe(0);
+    const again = await importShare(shareCollection(trip, items, { from: 'Sam' }));
+    expect(await db.collections.count()).toBe(1);
+    expect(again).toMatchObject({ added: 0 });
+    expect((await db.collections.get(again.collectionId!))?.from?.shareId).toBe('c:sam-trip');
+    // Back to the library: still the same collection.
+    await importShare({ ...shareLibrary(items, [trip], { from: 'Sam', includePersonal: true }), shareId: 'l:samsphone' });
+    expect(await db.collections.count()).toBe(1);
+  });
+
+  it('still merges an older library share whose collections carry no fingerprint', async () => {
+    const lib = (): SharedPayloadV2 => ({
+      v: 2,
+      kind: 'library',
+      shareId: 'l:old',
+      from: 'Sam',
+      collections: [{ key: '0', name: 'Trip', emoji: '✈️', color: '#0ea5a4' }],
+      items: [{ t: 'link', n: 'A', u: 'https://a.example/', c: ['0'] }],
+    });
+    await importShare(lib());
+    expect((await db.collections.toArray()).map((c) => c.from?.shareId)).toEqual(['l:old:0']);
+    const preview = await planImport(lib());
+    expect(Object.keys(preview.existingByKey)).toEqual(['0']);
+    await importShare(lib());
+    expect(await db.collections.count()).toBe(1);
+  });
+
+  it('recognises a save without a link from the same friend, but not a stranger’s save with the same key', async () => {
+    const note = buildItem({ title: 'Pack sunscreen', type: 'note' });
+    await importShare(shareCollection(trip, [note], { from: 'Sam' }));
+    await importShare(shareItem(note, { from: 'Sam' }));
+    expect(await db.items.count()).toBe(1);
+    await importShare(shareItem({ ...note, title: 'Pack sunscreen (SPF 50)' }, { from: 'Sam' }));
+    expect(await db.items.count()).toBe(1);
+    await importShare(shareItem(note, { from: 'Alex' }));
+    expect(await db.items.count()).toBe(2);
+  });
+
+  it('knows a short link you saved before it was replaced by where it leads', async () => {
+    await addItem({ title: 'Video', type: 'video', url: 'https://www.tiktok.com/@x/video/7234', sharedText: 'https://vm.tiktok.com/ZMabc123/' });
+    const p: SharedPayloadV2 = { v: 2, kind: 'item', shareId: 'i:v', from: 'Sam', items: [{ t: 'video', n: 'TikTok', u: 'https://vm.tiktok.com/ZMabc123/' }] };
+    expect((await planImport(p)).rows).toEqual(['have']);
+    await importShare(p);
+    expect(await db.items.count()).toBe(1);
+    // A caption that merely mentions a link isn't the save's link.
+    await addItem({ title: 'Recipe', type: 'recipe', url: 'https://recipes.example/1', sharedText: 'Pan I use: https://shop.example/pan' });
+    const pan: SharedPayloadV2 = { v: 2, kind: 'item', shareId: 'i:p', items: [{ t: 'product', n: 'Pan', u: 'https://shop.example/pan' }] };
+    expect((await planImport(pan)).rows).toEqual(['new']);
+  });
+});
+
+describe('importShare: odd sources', () => {
+  it('never stores a source like "__proto__" (it would crash every card showing it)', async () => {
+    const res = await importShare({ v: 2, kind: 'item', shareId: 'i:cat', items: [{ t: 'link', n: 'Cute cat', u: 'https://example.com/cat', s: '__proto__' }] });
+    expect((await db.items.get(res.itemId!))?.source).toBeUndefined();
+    const base = { type: 'link', title: 'T', tags: [], collectionIds: [], status: 'todo', createdAt: 1, updatedAt: 1 };
+    await importBackup({ app: 'magpie', version: 1, collections: [], items: [{ ...base, id: 'b1', source: '__proto__' }, { ...base, id: 'b2', source: 'youtube' }] });
+    expect((await db.items.get('b1'))?.source).toBeUndefined();
+    expect((await db.items.get('b2'))?.source).toBe('youtube');
+  });
+});
+
+describe('importShare: big shares', () => {
+  // Many awaits inside one Dexie transaction used to make it commit early ("Transaction committed too early").
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => buildItem({ title: `Spot ${i}`, type: 'place', url: `https://spots.example/${i}`, tags: ['spot'] }));
+
+  it('imports a 150-save collection in one go', async () => {
+    const res = await importShare(await decodeShare(await encodeShare(shareCollection(lisbon, many(150), { from: 'Ana' }))));
+    expect(res).toMatchObject({ added: 150, updated: 0, skipped: 0 });
+    expect(await colItems(res.collectionId!)).toHaveLength(150);
+  });
+
+  it('imports a 300-save library spread over collections', async () => {
+    const items = many(300);
+    const a: Collection = { ...lisbon, id: 'ana-a', name: 'A' };
+    const b: Collection = { ...lisbon, id: 'ana-b', name: 'B' };
+    items.forEach((it, i) => (it.collectionIds = i % 3 === 0 ? [] : [i % 3 === 1 ? a.id : b.id]));
+    const res = await importShare(shareLibrary(items, [a, b], { from: 'Ana' }));
+    expect(res.added).toBe(300);
+    expect(await db.items.count()).toBe(300);
+    // A, B and the "Ana's saves" collection for the loose ones.
+    expect(res.collectionIds).toHaveLength(3);
   });
 });

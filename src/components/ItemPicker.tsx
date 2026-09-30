@@ -5,7 +5,9 @@ import { db, toggleItemInCollection } from '../lib/db';
 import { filterItems } from '../lib/filter';
 import { TYPE_INFO, type Collection } from '../lib/types';
 import { Sheet } from './Sheet';
+import { SourceIcon } from './SourceIcon';
 import { ThumbSmall } from './Thumb';
+import { WhenBadge } from './WhenBadge';
 
 /** Tick saves in or out of a hand-picked collection. */
 export function ItemPicker({ collection, open, onClose }: { collection: Collection; open: boolean; onClose: () => void }) {
@@ -39,9 +41,11 @@ export function ItemPicker({ collection, open, onClose }: { collection: Collecti
                 <div className="grow">
                   <div className="t">{item.title}</div>
                   <div className="s">
+                    {item.source && <SourceIcon source={item.source} size={14} />}
                     {TYPE_INFO[item.type].emoji} {TYPE_INFO[item.type].label}
                     {item.tags.length > 0 && ` · ${item.tags.map((t) => `#${t}`).join(' ')}`}
                   </div>
+                  {item.when && <WhenBadge when={item.when} variant="inline" />}
                 </div>
                 <span className={`check ${on ? 'on' : ''}`}>
                   <Check size={16} strokeWidth={3} />

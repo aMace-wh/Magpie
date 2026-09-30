@@ -1,22 +1,43 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Plus, Search, Settings, Sparkles } from 'lucide-react';
+import { Gift, Plus, Search, Settings, Share2, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Filters } from '../components/Filters';
 import { ItemGrid } from '../components/ItemCard';
+import { OpenShareFile } from '../components/OpenShareFile';
+import { ShareSheet } from '../components/ShareSheet';
 import { SurpriseSheet } from '../components/SurpriseSheet';
+import { ThumbSmall } from '../components/Thumb';
 import { useToast } from '../components/Toast';
+import { WhenBadge } from '../components/WhenBadge';
 import { db } from '../lib/db';
-import { filterItems, type ItemFilter } from '../lib/filter';
+import { filterItems, isFiltering, type ItemFilter } from '../lib/filter';
 import { useInstall } from '../lib/install';
 import { navigate } from '../lib/router';
 import { addSampleData } from '../lib/samples';
+import type { Item } from '../lib/types';
+import { compareWhen, whenStatus } from '../lib/when';
+
+const COMING_UP_MAX = 10;
+
+/** Saves still to do whose date is today or later (or on right now), soonest first. */
+function comingUp(items: Item[], now = new Date()): Item[] {
+  return items
+    .filter((i) => i.status === 'todo' && i.when && whenStatus(i.when, now) !== 'past')
+    .sort((a, b) => compareWhen(a.when, b.when))
+    .slice(0, COMING_UP_MAX);
+}
 
 export function HomeScreen({ onAdd }: { onAdd: () => void }) {
   const items = useLiveQuery(() => db.items.orderBy('createdAt').reverse().toArray(), []);
+  const collections = useLiveQuery(() => db.collections.toArray(), []);
   const [filter, setFilter] = useState<ItemFilter>({ query: '', type: 'all', status: 'todo' });
   const [surprise, setSurprise] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const shown = useMemo(() => filterItems(items ?? [], filter), [items, filter]);
   const scoped = useMemo(() => filterItems(items ?? [], { ...filter, type: 'all', status: 'any' }), [items, filter]);
+  const upcoming = useMemo(() => comingUp(items ?? []), [items]);
+  const showUpcoming = upcoming.length > 0 && !isFiltering(filter) && filter.status !== 'done';
+  const hasItems = !!items?.length;
 
   return (
     <>
@@ -25,6 +46,11 @@ export function HomeScreen({ onAdd }: { onAdd: () => void }) {
           <img src="pwa-192.png" alt="" />
           Magpie
         </h1>
+        {hasItems && (
+          <button className="icon-btn" aria-label="Share my library" title="Share my library" onClick={() => setSharing(true)}>
+            <Share2 size={19} />
+          </button>
+        )}
         <button className="icon-btn" aria-label="Settings" onClick={() => navigate('/settings')}>
           <Settings size={20} />
         </button>
@@ -39,12 +65,14 @@ export function HomeScreen({ onAdd }: { onAdd: () => void }) {
             <input
               className="input"
               type="search"
-              placeholder="Search your saves, notes and #tags"
+              aria-label="Search your saves"
+              placeholder="Search saves, places, notes and #tags"
               value={filter.query}
               onChange={(e) => setFilter({ ...filter, query: e.target.value })}
             />
           </div>
           <Filters items={scoped} filter={filter} onChange={setFilter} onSurprise={() => setSurprise(true)} />
+          {showUpcoming && <ComingUp items={upcoming} />}
           {shown.length ? (
             <ItemGrid items={shown} />
           ) : (
@@ -55,9 +83,34 @@ export function HomeScreen({ onAdd }: { onAdd: () => void }) {
             </div>
           )}
           <SurpriseSheet items={shown} open={surprise} onClose={() => setSurprise(false)} />
+          <ShareSheet open={sharing} onClose={() => setSharing(false)} target={{ kind: 'library', items, collections: collections ?? [] }} />
         </>
       )}
     </>
+  );
+}
+
+/** Horizontal strip of dated saves that are on now or coming up. */
+function ComingUp({ items }: { items: Item[] }) {
+  return (
+    <section className="upcoming" aria-labelledby="upcoming-title">
+      <h2 className="section-title" id="upcoming-title">
+        Coming up
+      </h2>
+      <ul className="upcoming-strip">
+        {items.map((item) => (
+          <li key={item.id}>
+            <button type="button" className="upcoming-tile" onClick={() => navigate(`/item/${encodeURIComponent(item.id)}`)}>
+              <ThumbSmall item={item} />
+              <span className="upcoming-body">
+                <span className="upcoming-name">{item.title || 'Untitled'}</span>
+                <WhenBadge when={item.when!} variant="inline" />
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -77,11 +130,14 @@ function Welcome({ onAdd }: { onAdd: () => void }) {
       <ol className="steps">
         <li>
           <span className="n">1</span>
+          {/* iPhone and iPad can't share to a web app, installed or not: links come in with + and paste. */}
           <span>
-            {install.standalone
-              ? 'Tap Share in any app and pick Magpie.'
-              : install.ios
-                ? 'Add Magpie to your Home Screen, then paste links in with the + button.'
+            {install.ios
+              ? install.standalone
+                ? 'Copy a link in any app, then tap + and paste it.'
+                : 'Add Magpie to your Home Screen, then paste links in with the + button.'
+              : install.standalone
+                ? 'Tap Share in any app and pick Magpie.'
                 : 'Install Magpie, then tap Share in any app and pick Magpie.'}
           </span>
         </li>
@@ -108,6 +164,12 @@ function Welcome({ onAdd }: { onAdd: () => void }) {
           <Sparkles size={18} /> Load examples
         </button>
       </div>
+      <p className="hero-friend">
+        Got a Magpie link from a friend? Paste it with +. A file?{' '}
+        <OpenShareFile className="link-btn">
+          <Gift size={14} aria-hidden /> Open it
+        </OpenShareFile>
+      </p>
     </section>
   );
 }

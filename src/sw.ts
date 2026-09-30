@@ -108,12 +108,18 @@ registerRoute(
 
 registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html')));
 
+// Browsers count each opaque (no-CORS) response as several MB of storage, and these caches share the quota with
+// your saves: keep them modest, and let them be emptied rather than a save failing when space runs out.
+
 // Map tiles you've looked at stay available offline.
 registerRoute(
   /^https:\/\/[a-z0-9.-]*tile\.openstreetmap\.org\//,
   new CacheFirst({
     cacheName: 'map-tiles',
-    plugins: [new CacheableResponsePlugin({ statuses: [0, 200] }), new ExpirationPlugin({ maxEntries: 800, maxAgeSeconds: 60 * 60 * 24 * 30 })],
+    plugins: [
+      new CacheableResponsePlugin({ statuses: [0, 200] }),
+      new ExpirationPlugin({ maxEntries: 300, maxAgeSeconds: 60 * 60 * 24 * 30, purgeOnQuotaError: true }),
+    ],
   }),
 );
 
@@ -122,6 +128,9 @@ registerRoute(
   ({ request, sameOrigin }) => !sameOrigin && request.destination === 'image',
   new CacheFirst({
     cacheName: 'thumbnails',
-    plugins: [new CacheableResponsePlugin({ statuses: [0, 200] }), new ExpirationPlugin({ maxEntries: 600, maxAgeSeconds: 60 * 60 * 24 * 90 })],
+    plugins: [
+      new CacheableResponsePlugin({ statuses: [0, 200] }),
+      new ExpirationPlugin({ maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 90, purgeOnQuotaError: true }),
+    ],
   }),
 );

@@ -1,0 +1,134 @@
+/* Save sheet: the friend-share banner and the compact "when / where" rows. */
+
+.save-share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 14px;
+  background: var(--accent-soft);
+}
+
+.save-share-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.save-share-text {
+  flex: 1 1 180px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.save-share-text span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.save-share .btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.save-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  min-width: 0;
+}
+
+.save-fact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.save-fact.wrap {
+  flex-wrap: wrap;
+}
+
+.save-fact > .when-badge {
+  flex: 0 1 auto;
+}
+
+/* Two classes: styles.css (loaded after this file) sets .chip to flex: 0 0 auto. */
+.chip.save-chip {
+  flex: 0 1 auto;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.chip.save-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.save-chip .spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.save-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-more {
+  flex: 0 0 auto;
+  padding: 6px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.save-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.save-place-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-clear {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.save-clear:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}

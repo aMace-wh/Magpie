@@ -1,5 +1,6 @@
 import { X } from 'lucide-react';
 import { useEffect, useRef, type ReactNode } from 'react';
+import { addToastLayer } from './Toast';
 
 interface Props {
   open: boolean;
@@ -16,9 +17,15 @@ export function Sheet({ open, title, onClose, children, footer }: Props) {
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) d.showModal();
+    if (open && !d.open) {
+      d.showModal();
+      // React's autoFocus runs before the dialog is open (so focus would land on Close): focus the intended field now.
+      d.querySelector<HTMLElement>('[data-autofocus]')?.focus();
+    }
     if (!open && d.open) d.close();
   }, [open]);
+
+  useEffect(() => (open && ref.current ? addToastLayer(ref.current) : undefined), [open]);
 
   return (
     <dialog

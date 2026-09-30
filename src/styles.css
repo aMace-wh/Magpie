@@ -207,7 +207,8 @@ img {
 @media (min-width: 900px) {
   .app {
     display: grid;
-    grid-template-columns: 232px 1fr;
+    /* minmax(0, …): a long row of filter chips scrolls inside the page instead of widening it. */
+    grid-template-columns: 232px minmax(0, 1fr);
   }
 
   .nav {
@@ -298,6 +299,8 @@ img {
   flex: 1;
   min-width: 0;
   margin: 0;
+  /* Friends' collection names can be one long word. */
+  overflow-wrap: anywhere;
   font-size: 28px;
   font-weight: 800;
   letter-spacing: -0.03em;
@@ -546,6 +549,12 @@ img {
   white-space: nowrap;
 }
 
+.chips.wrap .chip {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .chip .count {
   color: var(--faint);
   font-weight: 600;
@@ -591,6 +600,7 @@ img {
 
 .segmented button {
   border: 0;
+  white-space: nowrap;
   padding: 7px 14px;
   border-radius: 9px;
   background: transparent;
@@ -607,6 +617,7 @@ img {
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin: 12px 0 16px;
@@ -711,10 +722,27 @@ img {
   min-width: 0;
 }
 
-.card-meta span {
+.card-meta > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.card-meta > svg,
+.card-meta > .card-flag {
+  flex: none;
+}
+
+.card-meta > .card-flag {
+  overflow: visible;
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* "· 2 weeks ago" shrinks (to "· 2 we…" and then nothing) long before the place or source does. */
+.card-meta > .card-ago {
+  flex: 0 1000 auto;
+  min-width: 0;
 }
 
 .card-badge {
@@ -735,6 +763,38 @@ img {
 
 .card-badge.done {
   background: var(--done);
+}
+
+/* Done tick on the left, "from Sam" on the right, sharing one row. */
+.card-badges {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.card-badges .card-badge {
+  position: static;
+  flex: none;
+}
+
+.card-badge.compact {
+  padding: 3px 5px;
+}
+
+.card-badges .card-badge.from {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.card-badge.from > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thumb {
@@ -822,6 +882,7 @@ img {
 }
 
 .col-tile {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -879,6 +940,8 @@ img {
 }
 
 .col-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1170,6 +1233,14 @@ dialog.sheet::backdrop {
   white-space: nowrap;
 }
 
+.list-row .s > .source-icon {
+  margin-right: 6px;
+}
+
+.list-row .grow > .when-badge {
+  margin-top: 4px;
+}
+
 .check {
   flex: 0 0 auto;
   width: 26px;
@@ -1313,6 +1384,94 @@ dialog.sheet::backdrop {
   font-size: 14px;
   background: var(--surface-2);
   border-color: transparent;
+}
+
+/* Source · saved … · in 10 days: stays beside the Kind picker while it fits, and wraps inside itself. */
+.item-meta-facts {
+  display: flex;
+  flex: 1 1 160px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 13px;
+  min-width: 0;
+}
+
+/* Separator dots that never start a line: each sits in the gap before its part, and the row clips the ones that
+   would begin a line (its left edge is where lines start). Keep focusable things out of a .dots row. */
+.dots {
+  clip-path: inset(-4px -4px -4px 0);
+}
+
+.dots > .dot {
+  position: relative;
+}
+
+.dots > .dot::before {
+  content: '·';
+  position: absolute;
+  right: 100%;
+  width: 13px;
+  text-align: center;
+  color: var(--faint);
+}
+
+.item-meta-source,
+.item-meta-when,
+.item-from {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.item-meta-when {
+  gap: 4px;
+}
+
+.item-meta-source > span:last-child,
+.item-from > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-meta svg {
+  flex: none;
+}
+
+/* Location header: flag, place name, then "Lisbon, Portugal". */
+.place-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+
+.place-head strong {
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.place-flag {
+  flex: none;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.place-sub {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.when-source {
+  overflow-wrap: anywhere;
 }
 
 .panel {
@@ -1671,6 +1830,16 @@ dialog.sheet::backdrop {
   color: var(--danger);
 }
 
+/* A label with a wide control: the control drops below the label when they don't fit side by side. */
+.setting.wraps {
+  flex-wrap: wrap;
+  row-gap: 10px;
+}
+
+.setting.wraps .grow {
+  min-width: auto;
+}
+
 /* ------------------------------------------------------------------ Toasts */
 
 .toasts {
@@ -1691,6 +1860,20 @@ dialog.sheet::backdrop {
   .toasts {
     bottom: 24px;
     left: 232px;
+  }
+}
+
+/* While a sheet is open the toasts live inside it (see Toast.tsx): at the top on phones, clear of the sheet. */
+dialog .toasts {
+  top: calc(12px + var(--safe-top));
+  bottom: auto;
+  left: 0;
+}
+
+@media (min-width: 640px) {
+  dialog .toasts {
+    top: auto;
+    bottom: 24px;
   }
 }
 

@@ -2,7 +2,19 @@ import { Copy, FileDown, Mail, MessageCircle, MessageSquareText, Send, Share2 } 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { plural } from '../lib/format';
 import { getSettings, setSettings } from '../lib/settings';
-import { payloadEmoji, payloadTitle, planShare, shareCollection, shareItem, shareLibrary, toShareFile, type SharePlan, type SharedPayloadV2 } from '../lib/share';
+import {
+  appUrl,
+  MAX_SHARE_ITEMS,
+  payloadEmoji,
+  payloadTitle,
+  planShare,
+  shareCollection,
+  shareItem,
+  shareLibrary,
+  toShareFile,
+  type SharePlan,
+  type SharedPayloadV2,
+} from '../lib/share';
 import { canShareFiles, copyText, downloadFile, isMobileDevice, shareFiles } from '../lib/shareSheet';
 import { acceptsText, buildShareUrl, fileMessage, shareMessage, SOCIAL_TARGETS, targetShareUrl, type SocialTarget, type SocialTargetId } from '../lib/social';
 import { TYPE_INFO, type Collection, type Item } from '../lib/types';
@@ -40,6 +52,7 @@ const GLYPHS: Record<SocialTargetId, ReactNode> = {
 };
 
 const hasPersonal = (i: Item) => (!!i.note && i.type !== 'note') || !!i.rating || !!i.review || i.status === 'done';
+const isTextNote = (i: Item) => i.type === 'note';
 
 function openExternal(url: string) {
   if (/^https:/i.test(url)) window.open(url, '_blank', 'noopener,noreferrer');
@@ -109,7 +122,15 @@ export function ShareSheet({ open, onClose, target }: Props) {
   const ready = !!prepared && prepared.payload === payload;
   const plan = ready ? prepared.plan : undefined;
   const count = item ? 1 : (items?.length ?? 0);
-  const personalAvailable = useMemo(() => (item ? hasPersonal(item) : (items ?? []).some(hasPersonal)), [item, items]);
+  const library = target.kind === 'library';
+  // Text notes: in a library share only with "Include my notes"; in a collection you picked, always (and it says so).
+  const notes = useMemo(() => (items ?? []).filter(isTextNote).length, [items]);
+  const personalAvailable = useMemo(
+    () => (item ? hasPersonal(item) : (items ?? []).some(hasPersonal) || (library && notes > 0)),
+    [item, items, library, notes],
+  );
+  const sending = payload?.items.length ?? count;
+  const capped = library && count - (personal ? 0 : notes) > MAX_SHARE_ITEMS;
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   const title = payload ? `${payloadEmoji(payload)} ${payloadTitle(payload)}` : '';
 
@@ -123,7 +144,7 @@ export function ShareSheet({ open, onClose, target }: Props) {
     if (!ready) return;
     saveName();
     const full = prepared.payload;
-    const text = fileMessage(full);
+    const text = fileMessage(full, appUrl());
     const json = toShareFile(full);
     // Chrome on Android won't share .json files, but takes the same content as text.
     const shareable = [json, toShareFile(full, 'text')].find((f) => canShareFiles([f]));
@@ -174,7 +195,10 @@ export function ShareSheet({ open, onClose, target }: Props) {
           <SummaryThumb emoji={collection.emoji} tint={collection.color} />
           <div className="grow">
             <div className="t">{collection.name}</div>
-            <div className="s">Share {plural(count, 'save')}</div>
+            <div className="s">
+              Share {plural(count, 'save')}
+              {notes > 0 && ` · includes ${plural(notes, 'text note')}`}
+            </div>
           </div>
         </>
       );
@@ -186,7 +210,7 @@ export function ShareSheet({ open, onClose, target }: Props) {
         <div className="grow">
           <div className="t">Your library</div>
           <div className="s">
-            Share {plural(count, 'save')}
+            Share {plural(sending, 'save')}
             {cols > 0 && ` in ${plural(cols, 'collection')}`}
           </div>
         </div>
@@ -228,10 +252,22 @@ export function ShareSheet({ open, onClose, target }: Props) {
                 <div className="t" id="ss-personal">
                   Include my notes & ratings
                 </div>
-                <div className="s">{personal ? 'Friends see your notes, stars and reviews.' : 'Friends just get the saves.'}</div>
+                <div className="s">
+                  {personal
+                    ? `Friends see your notes, stars and reviews${library && notes ? ` — and your ${plural(notes, 'text note')}` : ''}.`
+                    : library && notes
+                      ? `Friends just get the saves — your ${plural(notes, 'text note')} ${notes === 1 ? 'stays' : 'stay'} private.`
+                      : 'Friends just get the saves.'}
+                </div>
               </div>
               <button className="switch" role="switch" aria-checked={personal} aria-labelledby="ss-personal" onClick={() => setPersonal((v) => !v)} />
             </div>
+          )}
+
+          {capped && (
+            <p className="hint" style={{ marginTop: 12 }}>
+              Friends can add up to {MAX_SHARE_ITEMS.toLocaleString()} saves at a time, so your newest {MAX_SHARE_ITEMS.toLocaleString()} go.
+            </p>
           )}
 
           <div className="ss-status" aria-live="polite">
@@ -243,9 +279,8 @@ export function ShareSheet({ open, onClose, target }: Props) {
               <div className="ss-note">
                 <FileDown size={18} aria-hidden />
                 <span>
-                  {failed
-                    ? "This browser can't make Magpie links — send it as a file; your friend opens it with Magpie."
-                    : 'This is too big for a link — send it as a file; your friend opens it with Magpie.'}
+                  {failed ? "This browser can't make Magpie links — send it as a file." : 'This is too big for a link — send it as a file.'} Your friend opens
+                  it in Magpie: Settings → Add a friend's share → Open a share file.
                 </span>
               </div>
             ) : plan?.slim ? (

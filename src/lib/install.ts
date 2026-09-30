@@ -32,6 +32,14 @@ export function isStandalone(): boolean {
   );
 }
 
+/**
+ * A chat or social app's built-in browser (Instagram, Facebook, Messenger, LINE, WeChat, TikTok, Snapchat…).
+ * Its storage is its own, so saves added there don't show up in your Magpie.
+ */
+export function isInAppBrowser(ua = typeof navigator === 'undefined' ? '' : navigator.userAgent): boolean {
+  return /\b(?:FBAN|FBAV|FB_IAB|FBIOS|Instagram|Line\/|MicroMessenger|Snapchat|musical_ly|BytedanceWebview|TikTok|Twitter|LinkedInApp|GSA\/)/i.test(ua);
+}
+
 export function isIos(): boolean {
   return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }

@@ -42,6 +42,13 @@ export interface SharedFrom {
   /** Stable id of the share, so re-importing an updated share merges instead of duplicating. */
   shareId?: string;
   at: number;
+  /** Items: the sender's key for a save without a link, to recognise it when it comes again in another of their shares. */
+  key?: string;
+  /**
+   * Items: what the share said when it was last imported (a fingerprint per shared field, and the tags), so opening
+   * it again only applies what your friend changed since — never undoes your own edits.
+   */
+  shared?: { sig: Record<string, string>; tags: string[] };
 }
 
 export interface Item {

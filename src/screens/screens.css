@@ -1,0 +1,306 @@
+/* Screen-level additions: "Coming up" strip, map Countries view, journal countries, friend collections, settings fields.
+   Built only on the theme variables from styles.css, so light and dark both work. */
+
+/* ------------------------------------------------------------------ Home: coming up */
+
+.upcoming {
+  margin: 0 0 18px;
+}
+
+.upcoming .section-title {
+  margin: 0 0 6px;
+}
+
+.upcoming-strip {
+  /* Contains the date badges' absolutely positioned screen-reader text, which would otherwise escape the
+     scroller and widen the whole page. */
+  position: relative;
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  margin: 0 -16px;
+  padding: 4px 16px 8px;
+  list-style: none;
+  scroll-snap-type: x proximity;
+  scroll-padding: 0 16px;
+}
+
+.upcoming-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.upcoming-strip > li {
+  flex: 0 0 auto;
+  display: flex;
+  scroll-snap-align: start;
+}
+
+.upcoming-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 236px;
+  max-width: 72vw;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  text-align: left;
+}
+
+.upcoming-tile:hover {
+  background: var(--surface-2);
+}
+
+.upcoming-tile .thumb-sm {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  font-size: 26px;
+}
+
+.upcoming-tile .thumb-sm img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.upcoming-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.upcoming-name {
+  max-width: 100%;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.upcoming-body .when-badge--inline {
+  padding: 3px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+/* Room for the end date of something on now ("On now · until Oct 20"); two even lines rather than a lone "PM". */
+.upcoming-body .when-badge-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+/* "Got a Magpie link from a friend? … Open it" under the welcome buttons. */
+.hero .hero-friend {
+  margin: 16px 0 0;
+  font-size: 14px;
+}
+
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ Map: view toggle + Countries */
+
+.map-top .map-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  /* Let drags on the gaps reach the map. */
+  pointer-events: none;
+}
+
+.map-top .map-row > * {
+  pointer-events: auto;
+}
+
+.map-top .map-row > .spacer {
+  pointer-events: none;
+}
+
+/* Fits beside the status toggle on most phones; wraps below it on the narrowest. */
+.map-top .map-row .select {
+  flex-basis: 120px;
+}
+
+.map-view button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map-screen .leaflet-container[hidden] {
+  display: none;
+}
+
+.map-card .when-badge {
+  margin-top: 4px;
+}
+
+/* Zoom buttons and attribution move up while a save's card is open (MapCard sets the space). */
+.map-screen .leaflet-bottom {
+  bottom: var(--map-card-space, 0px);
+  transition: bottom 0.15s ease;
+}
+
+.map-screen.is-list {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.map-screen.is-list .map-top {
+  position: static;
+  width: 100%;
+  max-width: 752px;
+  margin: 0 auto;
+  padding: calc(12px + var(--safe-top)) 16px 12px;
+}
+
+.map-screen.is-list .map-top .segmented {
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+.map-screen.is-list .map-top .select {
+  box-shadow: none;
+}
+
+.map-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 16px 24px;
+}
+
+.map-list-inner {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+/* ------------------------------------------------------------------ Journal: countries */
+
+.stats.four {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+@media (min-width: 560px) {
+  .stats.four {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.journal-flags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  margin: 12px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.journal-flags-label {
+  margin-right: 2px;
+}
+
+.journal-flag {
+  font-size: 22px;
+  line-height: 1.25;
+}
+
+/* ------------------------------------------------------------------ Collections */
+
+.col-from {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-top: -6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--accent);
+}
+
+.col-from svg {
+  flex: 0 0 auto;
+}
+
+.col-from span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-view {
+  margin-bottom: 12px;
+}
+
+.col-view .segmented button {
+  padding: 7px 12px;
+}
+
+/* ------------------------------------------------------------------ Settings: text fields */
+
+.setting.setting-field {
+  align-items: flex-start;
+}
+
+.setting-field > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.setting-field label.t {
+  display: block;
+}
+
+.setting-field .input {
+  margin-top: 8px;
+}
+
+.field-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.field-row .input {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}

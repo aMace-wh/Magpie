@@ -1,18 +1,23 @@
 import { BookOpen, House, LayoutGrid, Map as MapIcon, Plus } from 'lucide-react';
 import { lazy, Suspense, useEffect, useState } from 'react';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { SaveSheet } from './components/SaveSheet';
 import { ToastProvider } from './components/Toast';
 import { UpdatePrompt } from './components/UpdatePrompt';
 import type { SharedInput } from './lib/classify';
+import { setPendingImport, usePendingImport } from './lib/pendingImport';
+import { onLaunchFiles } from './lib/receive';
 import { navigate, parseRoute, usePath, type Route } from './lib/router';
 import { useSettings } from './lib/settings';
+import { parseShareInput } from './lib/share';
 import { CollectionScreen } from './screens/CollectionScreen';
 import { CollectionsScreen } from './screens/CollectionsScreen';
 import { HomeScreen } from './screens/HomeScreen';
-import { ImportScreen } from './screens/ImportScreen';
+import { ImportFileView, ImportScreen, ReceiveView } from './screens/ImportScreen';
 import { ItemScreen } from './screens/ItemScreen';
 import { JournalScreen } from './screens/JournalScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
+import './screens/screens.css';
 
 // The map pulls in Leaflet, so it's loaded on first visit.
 const MapScreen = lazy(() => import('./screens/MapScreen').then((m) => ({ default: m.MapScreen })));
@@ -22,12 +27,21 @@ interface SaveRequest {
   collectionId?: string;
 }
 
-/** Content handed over by the OS share sheet (Web Share Target) arrives as query params. */
+/**
+ * Content handed over by the OS share sheet (Web Share Target) arrives as query params.
+ * A friend's Magpie link opens the import screen instead of the save sheet.
+ */
 function takeSharedInput(): SharedInput | undefined {
   const params = new URLSearchParams(window.location.search);
   const input = { title: params.get('title'), text: params.get('text'), url: params.get('url') };
   if (!input.title && !input.text && !input.url) return undefined;
+  // Not `bare`: a single word shared from another app is something to save, not a share.
+  const payload = parseShareInput([input.url, input.text, input.title].filter(Boolean).join('\n'), { bare: false });
   history.replaceState(null, '', `${window.location.pathname}${window.location.hash || '#/'}`);
+  if (payload) {
+    navigate(`/import/${payload}`, { replace: true });
+    return undefined;
+  }
   return input;
 }
 
@@ -61,7 +75,8 @@ const TABS = [
 
 export function App() {
   useTheme();
-  const route = parseRoute(usePath());
+  const path = usePath();
+  const route = parseRoute(path);
   const [save, setSave] = useState<SaveRequest | null>(sharedAtLaunch ? { initial: sharedAtLaunch } : null);
 
   // "#/new" (home-screen shortcut) opens the save sheet.
@@ -71,6 +86,14 @@ export function App() {
       setSave({});
     }
   }, [route.name]);
+
+  // Share files the installed app was opened with (File Handling API).
+  useEffect(() => {
+    onLaunchFiles((files) => {
+      setPendingImport(files[0]);
+      navigate('/import-file');
+    });
+  }, []);
 
   const openSave = (collectionId?: string) => setSave({ collectionId });
 
@@ -96,6 +119,12 @@ export function App() {
       break;
     case 'import':
       screen = <ImportScreen payload={route.payload} />;
+      break;
+    case 'receive':
+      screen = <ReceiveView key={route.key} inboxKey={route.key} />;
+      break;
+    case 'import-file':
+      screen = <PendingImport />;
       break;
     default:
       screen = <HomeScreen onAdd={() => openSave()} />;
@@ -124,11 +153,30 @@ export function App() {
           {right.map(tab)}
         </nav>
         <main className={route.name === 'map' ? 'main full' : 'main'}>
-          <Suspense fallback={null}>{screen}</Suspense>
+          <ErrorBoundary resetKey={path}>
+            <Suspense fallback={null}>{screen}</Suspense>
+          </ErrorBoundary>
         </main>
       </div>
       <SaveSheet open={!!save} initial={save?.initial} collectionId={save?.collectionId} onClose={() => setSave(null)} />
       <UpdatePrompt />
     </ToastProvider>
+  );
+}
+
+/** "#/import-file": previews the share file picked in Settings or opened with the app. */
+function PendingImport() {
+  const file = usePendingImport();
+  if (file) return <ImportFileView file={file} />;
+  // e.g. the page was reloaded: the file only lived in memory.
+  return (
+    <div className="empty">
+      <div className="emoji">📂</div>
+      <h2>Nothing to import</h2>
+      <p>Open the share file again from Settings → Add a friend's share.</p>
+      <button className="btn primary" onClick={() => navigate('/settings', { replace: true })}>
+        Go to Settings
+      </button>
+    </div>
   );
 }

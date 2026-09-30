@@ -1,7 +1,9 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { FolderPlus, Zap } from 'lucide-react';
-import { useState } from 'react';
+import { FileInput, FolderPlus, Users, Zap } from 'lucide-react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { CollectionEditor } from '../components/CollectionEditor';
+import { OpenShareFile } from '../components/OpenShareFile';
+import { safeUrl } from '../lib/classify';
 import { db } from '../lib/db';
 import { plural } from '../lib/format';
 import { navigate } from '../lib/router';
@@ -12,11 +14,19 @@ export function CollectionsScreen() {
   const collections = useLiveQuery(() => db.collections.orderBy('createdAt').reverse().toArray(), []);
   const items = useLiveQuery(() => db.items.orderBy('createdAt').reverse().toArray(), []) ?? [];
   const [editor, setEditor] = useState<{ smart: boolean } | null>(null);
+  // Collections added from a friend's share get their own section.
+  const [mine, friends] = useMemo(() => {
+    const list = collections ?? [];
+    return [list.filter((c) => !c.from), list.filter((c) => c.from)];
+  }, [collections]);
 
   return (
     <>
       <header className="page-header">
         <h1 className="page-title">Collections</h1>
+        <OpenShareFile className="icon-btn" label="Open a share file from a friend">
+          <FileInput size={19} aria-hidden />
+        </OpenShareFile>
         <button className="btn small primary" onClick={() => setEditor({ smart: false })}>
           <FolderPlus size={16} /> New
         </button>
@@ -38,11 +48,26 @@ export function CollectionsScreen() {
         </div>
       )}
 
-      <div className="col-grid">
-        {collections?.map((c) => (
-          <CollectionTile key={c.id} collection={c} items={itemsInCollection(items, c)} />
-        ))}
-      </div>
+      {mine.length > 0 && (
+        <div className="col-grid">
+          {mine.map((c) => (
+            <CollectionTile key={c.id} collection={c} items={itemsInCollection(items, c)} />
+          ))}
+        </div>
+      )}
+
+      {friends.length > 0 && (
+        <section aria-labelledby="from-friends">
+          <h2 className="section-title" id="from-friends">
+            From friends
+          </h2>
+          <div className="col-grid">
+            {friends.map((c) => (
+              <CollectionTile key={c.id} collection={c} items={itemsInCollection(items, c)} />
+            ))}
+          </div>
+        </section>
+      )}
 
       <CollectionEditor open={!!editor} startSmart={editor?.smart} onClose={() => setEditor(null)} />
     </>
@@ -52,7 +77,8 @@ export function CollectionsScreen() {
 function CollectionTile({ collection, items }: { collection: Collection; items: Item[] }) {
   const covers = items.slice(0, 4);
   const todo = items.filter((i) => i.status === 'todo').length;
-  const tint = { ['--tint' as string]: collection.color };
+  const tint: CSSProperties = { ['--tint' as string]: collection.color };
+  const friend = collection.from ? collection.from.name?.trim() || 'a friend' : undefined;
   return (
     <button className="col-tile" onClick={() => navigate(`/collections/${collection.id}`)}>
       {covers.length === 0 ? (
@@ -62,15 +88,9 @@ function CollectionTile({ collection, items }: { collection: Collection; items: 
         </div>
       ) : (
         <div className="mosaic" style={tint}>
-          {[0, 1, 2, 3].map((n) => {
-            const item = covers[n];
-            if (item?.image) return <img key={n} src={item.image} alt="" loading="lazy" referrerPolicy="no-referrer" />;
-            return (
-              <div key={n} className="cell" style={tint}>
-                {item ? TYPE_INFO[item.type].emoji : n === 0 ? collection.emoji : ''}
-              </div>
-            );
-          })}
+          {[0, 1, 2, 3].map((n) => (
+            <MosaicCell key={n} item={covers[n]} fallback={n === 0 ? collection.emoji : ''} tint={tint} />
+          ))}
           {collection.kind === 'smart' && <SmartBadge />}
         </div>
       )}
@@ -81,7 +101,25 @@ function CollectionTile({ collection, items }: { collection: Collection; items: 
         {plural(items.length, 'save')}
         {todo > 0 && todo !== items.length ? ` · ${todo} to do` : ''}
       </div>
+      {friend && (
+        <div className="col-from">
+          <Users size={12} aria-hidden />
+          <span>from {friend}</span>
+        </div>
+      )}
     </button>
+  );
+}
+
+/** A cover picture, or the save's emoji when it has none (or it doesn't load). */
+function MosaicCell({ item, fallback, tint }: { item?: Item; fallback: string; tint: CSSProperties }) {
+  const [failed, setFailed] = useState<string>();
+  const src = safeUrl(item?.image);
+  if (src && src !== failed) return <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(src)} />;
+  return (
+    <div className="cell" style={tint}>
+      {item ? TYPE_INFO[item.type].emoji : fallback}
+    </div>
   );
 }
 

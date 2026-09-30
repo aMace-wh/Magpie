@@ -70,6 +70,36 @@ export function safeUrl(raw: unknown): string | undefined {
   return u && /^https?:/i.test(u) ? u : undefined;
 }
 
+/** Per-sharer tracking parameters platforms add to links (Instagram igsh, YouTube si, TikTok _t, utm_*…). */
+export const TRACKING_PARAMS =
+  /^(?:utm_\w+|fbclid|gclid|dclid|gbraid|wbraid|msclkid|mc_cid|mc_eid|igsh|igshid|si|feature|mibextid|ref_src|ref_url|_branch_match_id|share_source|xmt|_t|_r|is_from_webapp|sender_device|web_id|share_app_id|share_link_id|u_code|tt_from)$/i;
+
+/** The link without tracking parameters (unchanged, character for character, when it has none). */
+export function stripTracking(raw: string): string {
+  if (!/[?&]/.test(raw)) return raw;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return raw;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return raw;
+  const drop = [...new Set(u.searchParams.keys())].filter((k) => TRACKING_PARAMS.test(k));
+  if (!drop.length) return raw;
+  for (const k of drop) u.searchParams.delete(k);
+  return u.toString();
+}
+
+const URL_RE_ALL = new RegExp(URL_RE.source, 'gi');
+
+/** Text with the tracking parameters taken out of every link in it. */
+export function stripTrackingInText(text: string): string {
+  return text.replace(URL_RE_ALL, (m) => {
+    const [, core, tail] = /^(.*?)([.,;:!?)\]}»”’]*)$/s.exec(m)!;
+    return stripTracking(core) + tail;
+  });
+}
+
 export function hostOf(url: string | undefined): string {
   if (!url) return '';
   try {
@@ -287,8 +317,13 @@ const SOURCE_NAMES: Record<string, string> = {
 };
 
 export function sourceLabel(source: string | undefined): string | undefined {
-  return source ? SOURCE_NAMES[source] ?? source : undefined;
+  if (!source) return undefined;
+  // Own keys only: a source like "__proto__" or "constructor" (e.g. from a crafted share) must stay plain text.
+  return Object.hasOwn(SOURCE_NAMES, source) ? SOURCE_NAMES[source] : source;
 }
+
+/** What a source id looks like ("youtube", "google-maps"); anything else from outside is dropped. */
+export const SOURCE_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 function matchDomain(url: string): { rule: DomainRule; host: string } | undefined {
   let u: URL;
@@ -1145,6 +1180,27 @@ export function sharedTextOf(input: SharedInput): string | undefined {
   if (url && !parts.some((p) => p.includes(url))) parts.push(url);
   const unique = parts.filter((p, i) => parts.indexOf(p) === i && !parts.some((q, j) => j !== i && q !== p && q.includes(p)));
   const out = unique.join('\n');
+  return out ? out.slice(0, MAX_SHARED_TEXT) : undefined;
+}
+
+const lf = (s: string) => s.replace(/\r\n?/g, '\n');
+
+/**
+ * The original post to keep with a save made in the Save sheet: text another app handed over (the share sheet,
+ * the clipboard, a paste or a drop) that is still in the box — never words typed in it, which may be private
+ * ("for Anna's birthday, don't tell her") and would otherwise travel with every share of the save.
+ */
+export function handedText(box: string, handed: readonly string[]): string | undefined {
+  const text = lf(box);
+  const kept: string[] = [];
+  for (const h of handed) {
+    const t = lf(h).trim();
+    if (!t || !text.includes(t) || kept.some((k) => k.includes(t))) continue;
+    // A bigger paste that contains an earlier one replaces it.
+    for (let i = kept.length - 1; i >= 0; i--) if (t.includes(kept[i])) kept.splice(i, 1);
+    kept.push(t);
+  }
+  const out = kept.join('\n');
   return out ? out.slice(0, MAX_SHARED_TEXT) : undefined;
 }
 

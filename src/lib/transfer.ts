@@ -1,7 +1,8 @@
-import { normalizeUrl, safeUrl } from './classify';
+import { normalizeUrl, safeUrl, SOURCE_ID_RE, TRACKING_PARAMS } from './classify';
 import { buildItem, db, uniqueTags } from './db';
 import { uid } from './id';
-import { getDeviceId, isWhenEnd, isWhenString, normalizePayload, type SharedCollection, type SharedItemV2, type SharedPayloadV2 } from './share';
+import { mergePlaceDetails } from './location';
+import { getDeviceId, isWhenEnd, isWhenString, normalizePayload, shortHash, type SharedCollection, type SharedItemV2, type SharedPayloadV2 } from './share';
 import { COLLECTION_COLORS, ITEM_TYPES, TYPE_INFO, type Collection, type Item, type ItemType, type Place, type SharedFrom, type When } from './types';
 
 function safeLink(raw: unknown): string | undefined {
@@ -19,6 +20,13 @@ function safeText(raw: unknown, max: number): string | undefined {
 function safeType(raw: unknown): ItemType {
   return ITEM_TYPES.includes(raw as ItemType) ? (raw as ItemType) : 'link';
 }
+
+/** A platform id like "youtube"; anything else (e.g. "__proto__") is dropped. */
+function safeSource(raw: unknown): string | undefined {
+  return typeof raw === 'string' && SOURCE_ID_RE.test(raw) ? raw : undefined;
+}
+
+const KEY_RE = /^[a-z0-9]{1,13}$/;
 
 /** ISO 3166-1 alpha-2, upper case ("pt" → "PT", "UK" → "GB"). */
 function safeCountryCode(raw: unknown): string | undefined {
@@ -74,6 +82,16 @@ function safeFrom(raw: unknown, now: number): SharedFrom | undefined {
   const shareId = typeof f.shareId === 'string' && /^[A-Za-z0-9:_.-]{1,200}$/.test(f.shareId) ? f.shareId : undefined;
   if (name) from.name = name;
   if (shareId) from.shareId = shareId;
+  if (typeof f.key === 'string' && KEY_RE.test(f.key)) from.key = f.key;
+  const shared = f.shared as { sig?: unknown; tags?: unknown } | undefined;
+  if (shared && typeof shared === 'object' && shared.sig && typeof shared.sig === 'object') {
+    const sig: Record<string, string> = {};
+    for (const k of MERGED) {
+      const v = (shared.sig as Record<string, unknown>)[k];
+      if (typeof v === 'string' && KEY_RE.test(v)) sig[k] = v;
+    }
+    from.shared = { sig, tags: safeTags(shared.tags) };
+  }
   return from;
 }
 
@@ -95,8 +113,6 @@ function num(raw: unknown, fallback: number): number {
 
 // ---------------------------------------------------------------------------
 // Matching
-
-const TRACKING_PARAMS = /^(?:utm_\w+|fbclid|gclid|dclid|gbraid|wbraid|msclkid|mc_cid|mc_eid|igsh|igshid|si|feature|mibextid|ref_src|ref_url|_branch_match_id|share_source|xmt)$/i;
 
 /** A comparison key for links: ignores http/https, "www.", trailing slashes, fragments and tracking params. */
 export function urlKey(raw: string | undefined): string | undefined {
@@ -129,6 +145,8 @@ interface Incoming {
     Partial<Pick<Item, 'url' | 'note' | 'description' | 'image' | 'siteName' | 'source' | 'place' | 'when' | 'sharedText'>>;
   url?: string;
   match: string;
+  /** The sender's key for a save without a link (SharedItemV2.k). */
+  saveKey?: string;
   collectionKeys: string[];
 }
 
@@ -163,56 +181,74 @@ function toIncoming(s: SharedItemV2, index: number, sender: string | undefined):
   assign('description', safeText(s.ds, 2000));
   assign('image', safeUrl(s.i));
   assign('siteName', safeText(s.sn, 100));
-  assign('source', safeText(s.s, 40));
+  assign('source', safeSource(s.s));
   assign('place', safePlace(s.p));
   assign('when', safeWhen(s.w));
   assign('sharedText', safeText(s.x, 5000));
+  const url = urlKey(data.url);
   return {
     key: String(index),
     index,
     data,
-    url: urlKey(data.url),
+    url,
     match: titleKey(title, type),
+    saveKey: !url && typeof s.k === 'string' && KEY_RE.test(s.k) ? s.k : undefined,
     collectionKeys: Array.isArray(s.c) ? s.c.filter((k): k is string => typeof k === 'string') : [],
   };
 }
 
 interface Library {
   byUrl: Map<string, Item>;
+  /** Saves imported from a friend, by the sender's key for a save without a link. */
+  byKey: Map<string, Item[]>;
   /** Items imported earlier from this same share. */
   shareByUrl: Map<string, Item>;
   shareByTitle: Map<string, Item[]>;
 }
 
 function indexLibrary(items: Item[], shareId: string): Library {
-  const lib: Library = { byUrl: new Map(), shareByUrl: new Map(), shareByTitle: new Map() };
+  const lib: Library = { byUrl: new Map(), byKey: new Map(), shareByUrl: new Map(), shareByTitle: new Map() };
   for (const item of items) remember(lib, item, shareId);
   return lib;
 }
 
+function push<K, V>(map: Map<K, V[]>, key: K, value: V) {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
+
+/** The item's link keys: its link, and the short link it was saved as when that was replaced by where it leads. */
+function linkKeys(item: Item): string[] {
+  const keys = [urlKey(item.url)];
+  // A bare link as the original post is the one that was pasted ("vm.tiktok.com/…" before it was resolved).
+  const pasted = item.sharedText?.trim();
+  if (pasted && /^https?:\/\/\S+$/i.test(pasted)) keys.push(urlKey(pasted));
+  return [...new Set(keys.filter((k): k is string => !!k))];
+}
+
 function remember(lib: Library, item: Item, shareId: string) {
-  const u = urlKey(item.url);
-  if (u && !lib.byUrl.has(u)) lib.byUrl.set(u, item);
+  const keys = linkKeys(item);
+  for (const u of keys) if (!lib.byUrl.has(u)) lib.byUrl.set(u, item);
+  if (item.from?.key) push(lib.byKey, item.from.key, item);
   if (item.from?.shareId !== shareId) return;
-  if (u && !lib.shareByUrl.has(u)) lib.shareByUrl.set(u, item);
-  const t = titleKey(item.title, item.type);
-  const same = lib.shareByTitle.get(t);
-  if (same) same.push(item);
-  else lib.shareByTitle.set(t, [item]);
+  for (const u of keys) if (!lib.shareByUrl.has(u)) lib.shareByUrl.set(u, item);
+  push(lib.shareByTitle, titleKey(item.title, item.type), item);
 }
 
 /**
- * update: an earlier import from this share, to refresh · have: the link is already in your library ·
+ * update: an earlier import from this share, to refresh · have: already in your library ·
  * new: a new save · dup: same link as incoming[of], which this import adds or updates (one save, linked twice).
  */
 type Resolution = { status: 'update'; item: Item } | { status: 'have'; item: Item } | { status: 'new' } | { status: 'dup'; of: number };
 
 /**
- * The earlier import (from this share) that each incoming save updates: same link first, then same title + type —
- * but only when one of the two has no link, since two different links are two different saves whatever
- * they're called ("Instagram", "Film on Letterboxd"…). Each earlier save is matched at most once.
+ * The earlier import (from this share) that each incoming save updates: same link first, then the sender's key for
+ * a save without a link, then same title + type — but only when one of the two has no link, since two different
+ * links are two different saves whatever they're called ("Instagram", "Film on Letterboxd"…). Each earlier save is
+ * matched at most once.
  */
-function matchEarlier(lib: Library, incoming: Incoming[]): (Item | undefined)[] {
+function matchEarlier(lib: Library, incoming: Incoming[], shareId: string): (Item | undefined)[] {
   const claimed = new Set<string>();
   const claim = (item: Item | undefined) => {
     if (!item || claimed.has(item.id)) return undefined;
@@ -220,6 +256,10 @@ function matchEarlier(lib: Library, incoming: Incoming[]): (Item | undefined)[] 
     return item;
   };
   const out = incoming.map((inc) => claim(inc.url ? lib.shareByUrl.get(inc.url) : undefined));
+  incoming.forEach((inc, i) => {
+    if (out[i] || !inc.saveKey) return;
+    out[i] = claim(lib.byKey.get(inc.saveKey)?.find((it) => it.from?.shareId === shareId && !claimed.has(it.id)));
+  });
   incoming.forEach((inc, i) => {
     // A link you already have is linked, not merged into a same-titled save (that would duplicate the link).
     if (out[i] || (inc.url && lib.byUrl.has(inc.url))) return;
@@ -230,15 +270,17 @@ function matchEarlier(lib: Library, incoming: Incoming[]): (Item | undefined)[] 
 
 /**
  * What happens to each save in the share (always resolved over the whole share, so the preview and a partial
- * import agree). A link that appears twice becomes one save.
+ * import agree). A link that appears twice becomes one save. A save without a link that the same friend sent
+ * before in another share (their collection, then their library…) is recognised by its key.
  */
-function resolveAll(lib: Library, incoming: Incoming[]): Resolution[] {
-  const earlier = matchEarlier(lib, incoming);
+function resolveAll(lib: Library, incoming: Incoming[], shareId: string, sender: string | undefined): Resolution[] {
+  const earlier = matchEarlier(lib, incoming, shareId);
   // Links this import will hold, so a later copy of the same link doesn't add a second save.
   const seen = new Map<string, Resolution>();
+  const sameSender = (it: Item) => (it.from?.name ?? '') === (sender ?? '');
   return incoming.map((inc, i) => {
     const prev = earlier[i];
-    const have = inc.url ? lib.byUrl.get(inc.url) : undefined;
+    const have = inc.url ? lib.byUrl.get(inc.url) : inc.saveKey ? lib.byKey.get(inc.saveKey)?.find(sameSender) : undefined;
     const again = inc.url ? seen.get(inc.url) : undefined;
     const r: Resolution = prev ? { status: 'update', item: prev } : have ? { status: 'have', item: have } : (again ?? { status: 'new' });
     if (inc.url && !seen.has(inc.url)) seen.set(inc.url, r.status === 'have' ? r : { status: 'dup', of: i });
@@ -246,24 +288,47 @@ function resolveAll(lib: Library, incoming: Incoming[]): Resolution[] {
   });
 }
 
-/** Applies the sender's shared fields to an earlier import. Never touches status, rating, review or note; never clears a field. */
+/** Shared fields a later import can refresh. */
+const MERGED = ['title', 'url', 'image', 'description', 'siteName', 'source', 'place', 'when', 'sharedText'] as const;
+
+const fingerprint = (v: unknown) => shortHash(JSON.stringify(v ?? null));
+
+/** What the share says now, to compare with next time (SharedFrom.shared). */
+function sharedState(inc: Incoming): NonNullable<SharedFrom['shared']> {
+  const sig: Record<string, string> = {};
+  for (const k of MERGED) sig[k] = fingerprint(inc.data[k]);
+  return { sig, tags: inc.data.tags };
+}
+
+/**
+ * Applies what the sender changed since the last import to an earlier import. A field they didn't change keeps
+ * your version (you may have renamed it, moved the date or added place details); tags they added are added, tags
+ * you removed stay removed. Never touches status, rating, review or note; never clears a field.
+ */
 function mergeShared(item: Item, inc: Incoming): Item {
   const next: Item = { ...item };
   const d = inc.data;
-  next.title = d.title;
-  if (d.url) next.url = d.url;
-  if (d.image) next.image = d.image;
-  if (d.description) next.description = d.description;
-  if (d.siteName) next.siteName = d.siteName;
-  if (d.source) next.source = d.source;
-  if (d.place) next.place = d.place;
-  if (d.when) next.when = d.when;
-  if (d.sharedText) next.sharedText = d.sharedText;
-  next.tags = uniqueTags([...item.tags, ...d.tags]);
+  const last = item.from?.shared;
+  const now = sharedState(inc);
+  for (const k of MERGED) {
+    const v = d[k];
+    if (v === undefined || (last && last.sig[k] === now.sig[k])) continue;
+    if (k === 'place') {
+      const p = v as Place;
+      // Same spot: keep the details you have (e.g. city and country filled in later), add any you're missing.
+      next.place = item.place && item.place.lat === p.lat && item.place.lng === p.lng ? mergePlaceDetails(item.place, p) : p;
+    } else {
+      (next as unknown as Record<string, unknown>)[k] = v;
+    }
+  }
+  const added = last ? d.tags.filter((t) => !last.tags.includes(t)) : d.tags;
+  next.tags = uniqueTags([...item.tags, ...added]);
+  next.from = { ...(item.from ?? { at: Date.now() }), shared: now };
+  if (inc.saveKey && !next.from.key) next.from.key = inc.saveKey;
   return next;
 }
 
-const SHARED_FIELDS = ['title', 'url', 'image', 'description', 'siteName', 'source', 'place', 'when', 'sharedText', 'tags', 'collectionIds'] as const;
+const SHARED_FIELDS = [...MERGED, 'tags', 'collectionIds'] as const;
 
 function changed(a: Item, b: Item): boolean {
   return SHARED_FIELDS.some((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
@@ -300,9 +365,29 @@ function sharedCollectionName(p: SharedPayloadV2, key: string | undefined, sende
   return { name: safeText(ref?.name, 80) ?? 'Collection', emoji: safeText(ref?.emoji, 8) ?? '📌', color: safeColor(ref?.color) };
 }
 
+/** shareId prefix of a library share's collection: the fingerprint of the sender's collection id (SharedCollectionRef.id). */
+const PRINT = 'cf:';
+
+/** The shareId a collection in the share is filed under (`key`: a library collection's key; undefined: the collection share itself). */
+function collectionShareId(data: SharedPayloadV2, key: string | undefined): string {
+  if (key === undefined) return data.shareId;
+  const print = key === LOOSE_KEY ? undefined : data.collections?.find((c) => c.key === key)?.id;
+  // Filed by the sender's own collection, so it's the same one whether it came in their library or on its own.
+  return print ? `${PRINT}${print}` : `${data.shareId}:${key}`;
+}
+
+/**
+ * The collection imported from `shareId` before. A collection shared on its own ("c:<id>") and the same collection
+ * in the sender's library ("cf:<fingerprint of id>") are one collection, whichever came first.
+ */
 async function findSharedCollection(shareId: string): Promise<Collection | undefined> {
-  const found = await db.collections.where('from.shareId').equals(shareId).toArray();
-  return found.find((c) => c.kind === 'manual');
+  const ids = shareId.startsWith('c:') ? [shareId, `${PRINT}${shortHash(shareId.slice(2))}`] : [shareId];
+  const found = (await db.collections.where('from.shareId').anyOf(ids).toArray()).filter((c) => c.kind === 'manual');
+  const match = found.find((c) => c.from?.shareId === shareId) ?? found[0];
+  if (match || !shareId.startsWith(PRINT)) return match;
+  const print = shareId.slice(PRINT.length);
+  const singles = await db.collections.where('from.shareId').startsWith('c:').toArray();
+  return singles.find((c) => c.kind === 'manual' && shortHash(c.from!.shareId!.slice(2)) === print);
 }
 
 /**
@@ -333,12 +418,14 @@ export async function importShare(payload: SharedPayloadV2 | SharedCollection, o
       const k = key ?? '';
       const known = targets.get(k);
       if (known) return known;
-      const shareId = key === undefined ? data.shareId : `${data.shareId}:${key}`;
+      const shareId = collectionShareId(data, key);
       const existing = await findSharedCollection(shareId);
       let id: string;
       if (existing) {
         id = existing.id;
-        await db.collections.update(id, { from: { ...existing.from, ...fromFor(shareId), at: existing.from?.at ?? now }, updatedAt: now });
+        // Keep the full id of a collection shared on its own over the library's fingerprint of it.
+        const filed = existing.from?.shareId?.startsWith('c:') && shareId.startsWith(PRINT) ? existing.from.shareId : shareId;
+        await db.collections.update(id, { from: { ...existing.from, ...fromFor(filed), at: existing.from?.at ?? now }, updatedAt: now });
       } else {
         id = uid();
         createdNow.add(id);
@@ -349,26 +436,30 @@ export async function importShare(payload: SharedPayloadV2 | SharedCollection, o
       return id;
     };
 
-    const collectionsFor = async (inc: Incoming): Promise<string[]> => {
+    const knownKeys = new Set((data.collections ?? []).map((c) => c.key));
+    const keysOf = (inc: Incoming): (string | undefined)[] => {
       if (data.kind === 'item') return [];
-      if (data.kind === 'collection') return [await ensureCollection(undefined)];
-      const known = new Set((data.collections ?? []).map((c) => c.key));
-      const keys = inc.collectionKeys.filter((k) => known.has(k));
-      const ids: string[] = [];
-      for (const k of keys.length ? keys : [LOOSE_KEY]) ids.push(await ensureCollection(k));
-      return ids;
+      if (data.kind === 'collection') return [undefined];
+      const keys = inc.collectionKeys.filter((k) => knownKeys.has(k));
+      return keys.length ? keys : [LOOSE_KEY];
     };
 
+    // Find or create every target collection up front, so the per-save loop below never awaits:
+    // an await per save inside a Dexie transaction makes big imports commit early.
+    const needed = new Set<string | undefined>();
+    for (const inc of incoming) for (const k of keysOf(inc)) needed.add(k);
     // An explicitly empty selection imports nothing; an empty collection share still creates the collection.
-    if (data.kind === 'collection' && !incoming.length && !selected) await ensureCollection(undefined);
+    if (data.kind === 'collection' && !incoming.length && !selected) needed.add(undefined);
+    for (const k of needed) await ensureCollection(k);
+    const collectionsFor = (inc: Incoming): string[] => keysOf(inc).map((k) => targets.get(k ?? '')!);
 
-    const resolutions = resolveAll(lib, all);
+    const resolutions = resolveAll(lib, all, data.shareId, sender);
     const added: Item[] = [];
     // The save each processed row (by index in the share) became, for later copies of the same link.
     const saveOf = new Map<number, Item>();
     const changedItems = new Map<string, Item>();
     for (const inc of incoming) {
-      const cols = await collectionsFor(inc);
+      const cols = collectionsFor(inc);
       let r = resolutions[inc.index];
       let row = inc.index;
       if (r.status === 'dup') {
@@ -390,7 +481,9 @@ export async function importShare(payload: SharedPayloadV2 | SharedCollection, o
         }
       }
       if (r.status === 'new') {
-        const item = buildItem({ ...inc.data, collectionIds: cols, from: fromFor(data.shareId) }, now - inc.index); // keeps the sender's order
+        const from: SharedFrom = { ...fromFor(data.shareId), shared: sharedState(inc) };
+        if (inc.saveKey) from.key = inc.saveKey;
+        const item = buildItem({ ...inc.data, collectionIds: cols, from }, now - inc.index); // keeps the sender's order
         added.push(item);
         saveOf.set(row, item);
         result.added++;
@@ -406,13 +499,13 @@ export async function importShare(payload: SharedPayloadV2 | SharedCollection, o
       const link = cols.filter((c) => !next.collectionIds.includes(c) && (r.status === 'have' || createdNow.has(c)));
       if (link.length) next = { ...next, collectionIds: [...next.collectionIds, ...link] };
       if (data.kind === 'item') result.itemId = r.item.id;
-      if (changed(current, next)) {
-        changedItems.set(r.item.id, { ...next, updatedAt: now });
-        if (r.status === 'update') result.updated++;
-        else result.skipped++;
-      } else {
-        result.skipped++;
+      const edited = changed(current, next);
+      // Also kept when only the record of what was shared changed, so the next import compares with it.
+      if (edited || JSON.stringify(current.from) !== JSON.stringify(next.from)) {
+        changedItems.set(r.item.id, { ...next, updatedAt: edited ? now : current.updatedAt });
       }
+      if (edited && r.status === 'update') result.updated++;
+      else result.skipped++;
     }
     if (added.length) await db.items.bulkAdd(added);
     if (changedItems.size) await db.items.bulkPut([...changedItems.values()]);
@@ -425,7 +518,7 @@ export async function importShare(payload: SharedPayloadV2 | SharedCollection, o
 export type ImportRowStatus = 'new' | 'update' | 'have';
 
 export interface ImportPreview {
-  /** Per item in payload.items: new save, update of an earlier import, or already in your library. */
+  /** Per item in payload.items: new save, update (an earlier import your friend has changed since), or already in your library. */
   rows: ImportRowStatus[];
   /** Row key → key of an earlier row with the same link. Such rows show as "have": one save, linked twice. */
   sameAs: Record<string, string>;
@@ -445,25 +538,34 @@ export async function planImport(payload: SharedPayloadV2): Promise<ImportPrevie
   const data = normalizePayload(payload);
   const sender = safeText(data.from?.trim(), 60);
   const lib = indexLibrary(await db.items.toArray(), data.shareId);
-  const counts: Record<ImportRowStatus, number> = { new: 0, update: 0, have: 0 };
-  let existingItem: Item | undefined;
-  const sameAs: Record<string, string> = {};
-  const rows = resolveAll(lib, data.items.map((s, i) => toIncoming(s, i, sender))).map((r, i): ImportRowStatus => {
-    if (r.status === 'dup') sameAs[String(i)] = String(r.of);
-    const status = r.status === 'dup' ? 'have' : r.status;
-    if (r.status === 'update' || r.status === 'have') existingItem ??= r.item;
-    counts[status]++;
-    return status;
-  });
-  const preview: ImportPreview = { rows, sameAs, counts, existingByKey: {}, own: await isOwnShare(data.shareId) };
-  if (data.kind === 'item') preview.existingItem = existingItem;
+  const preview: ImportPreview = { rows: [], sameAs: {}, counts: { new: 0, update: 0, have: 0 }, existingByKey: {}, own: await isOwnShare(data.shareId) };
   if (data.kind === 'collection') preview.existing = await findSharedCollection(data.shareId);
   if (data.kind === 'library') {
     for (const key of [...(data.collections ?? []).map((c) => c.key), LOOSE_KEY]) {
-      const c = await findSharedCollection(`${data.shareId}:${key}`);
+      const c = await findSharedCollection(collectionShareId(data, key));
       if (c) preview.existingByKey[key] = c;
     }
   }
+  // Would the save go into a collection this import has to make (a new one, or one you deleted)?
+  const known = new Set((data.collections ?? []).map((c) => c.key));
+  const makesCollection = (inc: Incoming) => {
+    if (data.kind === 'collection') return !preview.existing;
+    if (data.kind !== 'library') return false;
+    const keys = inc.collectionKeys.filter((k) => known.has(k));
+    return (keys.length ? keys : [LOOSE_KEY]).some((k) => !preview.existingByKey[k]);
+  };
+  const incoming = data.items.map((s, i) => toIncoming(s, i, sender));
+  let existingItem: Item | undefined;
+  preview.rows = resolveAll(lib, incoming, data.shareId, sender).map((r, i): ImportRowStatus => {
+    if (r.status === 'dup') preview.sameAs[String(i)] = String(r.of);
+    let status: ImportRowStatus = r.status === 'dup' ? 'have' : r.status;
+    if (r.status === 'update' || r.status === 'have') existingItem ??= r.item;
+    // Nothing changed on your friend's side since you added it: it's simply saved.
+    if (r.status === 'update' && !changed(r.item, mergeShared(r.item, incoming[i])) && !makesCollection(incoming[i])) status = 'have';
+    preview.counts[status]++;
+    return status;
+  });
+  if (data.kind === 'item') preview.existingItem = existingItem;
   return preview;
 }
 
@@ -576,7 +678,7 @@ export async function importBackup(raw: unknown): Promise<{ items: number; colle
         description: safeText(i.description, 2000),
         image: safeUrl(i.image),
         siteName: safeText(i.siteName, 100),
-        source: safeText(i.source, 40),
+        source: safeSource(i.source),
         tags: safeTags(i.tags),
         collectionIds: Array.isArray(i.collectionIds) ? i.collectionIds.filter((c): c is string => typeof c === 'string') : [],
         status: i.status === 'done' ? 'done' : 'todo',

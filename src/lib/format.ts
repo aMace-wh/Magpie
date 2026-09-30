@@ -22,5 +22,5 @@ export function dayLabel(ts: number): string {
 }
 
 export function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
+  return `${n.toLocaleString()} ${n === 1 ? one : many}`;
 }

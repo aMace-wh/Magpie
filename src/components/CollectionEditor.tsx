@@ -81,6 +81,7 @@ export function CollectionEditor({ open, onClose, collection, startSmart }: Prop
         className="input"
         value={name}
         autoFocus={!collection}
+        data-autofocus={!collection || undefined}
         placeholder="e.g. Tokyo trip, Date night, Sunday baking"
         onChange={(e) => setName(e.target.value)}
       />

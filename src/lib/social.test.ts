@@ -219,8 +219,12 @@ describe('shareMessage', () => {
   });
 
   it('file message', () => {
-    expect(fileMessage(many(12))).toBe("I'm sending you 🇵🇹 Weekend in Lisbon (12 saves) from my Magpie — open the attached file with Magpie to add it.");
-    expect(fileMessage(shareItem(gig))).toContain('“Fado night”');
+    expect(fileMessage(many(12), 'https://me.example/magpie/')).toBe(
+      "I'm sending you 🇵🇹 Weekend in Lisbon (12 saves) from my Magpie. To add them, open Magpie (https://me.example/magpie/) → Settings → " +
+        "Add a friend's share → Open a share file, and pick the attached file. On Android you can also share the file straight to Magpie.",
+    );
+    expect(fileMessage(shareItem(gig))).toContain('“Fado night” from my Magpie. To add it, open Magpie → Settings');
+    expect(fileMessage(shareItem(gig), 'javascript:alert(1)')).not.toContain('javascript');
   });
 });
 

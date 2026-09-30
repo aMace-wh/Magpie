@@ -1,7 +1,8 @@
 import Dexie, { type EntityTable } from 'dexie';
-import { classify, normalizeTag, type SharedInput } from './classify';
+import { classify, itemFieldsFrom, normalizeTag, type SharedInput } from './classify';
 import { uid } from './id';
 import type { Collection, Item } from './types';
+import { findWhen } from './when';
 
 export const db = new Dexie('magpie') as Dexie & {
   items: EntityTable<Item, 'id'>;
@@ -41,10 +42,17 @@ export async function addItem(data: NewItem): Promise<Item> {
   return item;
 }
 
-/** Classifies raw shared/pasted content and saves it in one go. */
+/**
+ * Classifies raw shared/pasted content and saves it in one go, keeping the original text.
+ * A clear event date in it (or any date, for an event) is saved too.
+ */
 export async function saveShared(input: SharedInput, extra: Partial<NewItem> = {}): Promise<Item> {
   const c = classify(input);
-  return addItem({ ...c, ...extra, tags: [...c.tags, ...(extra.tags ?? [])] });
+  const fields = itemFieldsFrom(c);
+  const type = extra.type ?? fields.type;
+  const m = findWhen(c.sharedText ?? [c.title, c.note].filter(Boolean).join('\n'));
+  const when = m && (m.confidence === 'high' || type === 'event') ? m.when : undefined;
+  return addItem({ ...fields, ...(when && { when }), ...extra, tags: [...c.tags, ...(extra.tags ?? [])] });
 }
 
 export async function updateItem(id: string, changes: Partial<Omit<Item, 'id' | 'createdAt'>>): Promise<void> {

@@ -1,8 +1,13 @@
 import { useEffect } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
+import { useToast } from './Toast';
 
-/** Shows a banner when a new version has been downloaded, and when the app is ready offline. */
+/**
+ * Tells the user when the app is ready offline and when a new version has been downloaded.
+ * Uses the shared toast stack so these notes never cover other messages (or hide behind a sheet).
+ */
 export function UpdatePrompt() {
+  const toast = useToast();
   const {
     needRefresh: [needRefresh, setNeedRefresh],
     offlineReady: [offlineReady, setOfflineReady],
@@ -14,28 +19,18 @@ export function UpdatePrompt() {
     },
   });
 
-  // The "ready offline" note is informational — let it fade on its own.
   useEffect(() => {
     if (!offlineReady) return;
-    const t = setTimeout(() => setOfflineReady(false), 4000);
-    return () => clearTimeout(t);
-  }, [offlineReady, setOfflineReady]);
+    toast('Magpie now works offline.');
+    setOfflineReady(false);
+  }, [offlineReady, setOfflineReady, toast]);
 
-  if (!needRefresh && !offlineReady) return null;
-  return (
-    <div className="toasts" style={{ zIndex: 1001 }}>
-      <div className="toast">
-        <span>{needRefresh ? 'A new version of Magpie is ready.' : 'Magpie now works offline.'}</span>
-        {needRefresh && <button onClick={() => updateServiceWorker(true)}>Update</button>}
-        <button
-          onClick={() => {
-            setNeedRefresh(false);
-            setOfflineReady(false);
-          }}
-        >
-          {needRefresh ? 'Later' : 'OK'}
-        </button>
-      </div>
-    </div>
-  );
+  useEffect(() => {
+    if (!needRefresh) return;
+    // If it's ignored, the new version still takes over the next time the app is opened.
+    toast('A new version of Magpie is ready.', { label: 'Update', onClick: () => void updateServiceWorker(true) }, { duration: 15000 });
+    setNeedRefresh(false);
+  }, [needRefresh, setNeedRefresh, toast, updateServiceWorker]);
+
+  return null;
 }

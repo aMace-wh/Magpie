@@ -43,7 +43,20 @@ export type Route =
   | { name: 'journal' }
   | { name: 'item'; id: string }
   | { name: 'settings' }
-  | { name: 'import'; payload: string };
+  | { name: 'import'; payload: string }
+  /** A share file handed over by the OS share sheet (parked by the service worker). */
+  | { name: 'receive'; key: string }
+  /** A share file picked in Settings or opened with the installed app (see pendingImport.ts). */
+  | { name: 'import-file' };
+
+// A malformed escape in a hand-edited link shouldn't crash the app.
+function decode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
 
 export function parseRoute(path: string): Route {
   const [, a, ...rest] = path.split('/');
@@ -55,17 +68,21 @@ export function parseRoute(path: string): Route {
     case 'new':
       return { name: 'new' };
     case 'collections':
-      return b ? { name: 'collection', id: decodeURIComponent(b) } : { name: 'collections' };
+      return b ? { name: 'collection', id: decode(b) } : { name: 'collections' };
     case 'map':
       return { name: 'map' };
     case 'journal':
       return { name: 'journal' };
     case 'item':
-      return { name: 'item', id: decodeURIComponent(b) };
+      return { name: 'item', id: decode(b) };
     case 'settings':
       return { name: 'settings' };
     case 'import':
       return { name: 'import', payload: b };
+    case 'import-file':
+      return { name: 'import-file' };
+    case 'receive':
+      return { name: 'receive', key: b };
     default:
       return { name: 'home' };
   }

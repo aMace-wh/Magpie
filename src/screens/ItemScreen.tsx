@@ -1,24 +1,49 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, Check, ExternalLink, MapPin, Navigation, Pencil, RefreshCw, Share2, Trash2, Undo2, Zap } from 'lucide-react';
-import { useState } from 'react';
+import {
+  ArrowLeft,
+  CalendarDays,
+  CalendarPlus,
+  Check,
+  Download,
+  ExternalLink,
+  MapPin,
+  Navigation,
+  Pencil,
+  RefreshCw,
+  Share2,
+  Trash2,
+  Undo2,
+  Users,
+  Zap,
+} from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { EditableText } from '../components/EditableText';
 import { MiniMap } from '../components/LazyMiniMap';
+import { OriginalPreview } from '../components/OriginalPreview';
 import { PlacePicker } from '../components/PlacePicker';
 import { ReviewSheet } from '../components/ReviewSheet';
+import { ShareSheet } from '../components/ShareSheet';
+import { SourceIcon } from '../components/SourceIcon';
 import { Stars } from '../components/Stars';
 import { TagInput } from '../components/TagInput';
 import { Thumb } from '../components/Thumb';
 import { useToast } from '../components/Toast';
-import { hostOf, sourceLabel } from '../lib/classify';
+import { WhenBadge } from '../components/WhenBadge';
+import { WhenEditor } from '../components/WhenEditor';
+import { calendarEventFromItem, downloadIcs, googleCalendarUrl, icsFileName, toIcs } from '../lib/calendar';
+import { hostOf, normalizeUrl, sourceLabel } from '../lib/classify';
 import { allTags, db, deleteItem, markTodo, toggleItemInCollection, updateItem } from '../lib/db';
-import { enrichItem } from '../lib/enrich';
+import { authorOf, originalTextOf } from '../lib/embed';
+import { enrichItem, REFRESH_OPTIONS } from '../lib/enrich';
 import { dayLabel, timeAgo } from '../lib/format';
 import { directionsLink } from '../lib/geo';
+import { flagEmoji, placeCountryCode, placeLabel } from '../lib/location';
+import { showOnMap } from '../lib/mapFocus';
 import { goBack, navigate } from '../lib/router';
 import { useSettings } from '../lib/settings';
-import { shareLink } from '../lib/shareSheet';
 import { matchesRules } from '../lib/smart';
 import { ITEM_TYPES, TYPE_INFO, type ItemType } from '../lib/types';
+import { findWhen, formatWhen, relativeWhen } from '../lib/when';
 
 export function ItemScreen({ id }: { id: string }) {
   const toast = useToast();
@@ -29,7 +54,15 @@ export function ItemScreen({ id }: { id: string }) {
   const tags = useLiveQuery(() => allTags(), []) ?? [];
   const [reviewing, setReviewing] = useState(false);
   const [placing, setPlacing] = useState(false);
+  const [dating, setDating] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+
+  // A date mentioned in the post, offered in the date editor.
+  const suggestion = useMemo(() => {
+    const text = [item?.title, item?.note, item?.sharedText, item?.description].filter(Boolean).join('\n');
+    return text ? findWhen(text)?.when : undefined;
+  }, [item?.title, item?.note, item?.sharedText, item?.description]);
 
   if (item === undefined) return null;
   if (item === null) {
@@ -47,8 +80,20 @@ export function ItemScreen({ id }: { id: string }) {
 
   const info = TYPE_INFO[item.type];
   const from = sourceLabel(item.source) ?? item.siteName ?? hostOf(item.url);
+  // Only web and map links are ever opened.
+  const href = normalizeUrl(item.url);
+  const openLabel = from ? `in ${from}` : href?.startsWith('geo:') ? 'in Maps' : 'link';
   const manual = collections.filter((c) => c.kind === 'manual');
   const smart = collections.filter((c) => c.kind === 'smart' && c.rules && matchesRules(item, c.rules));
+  const calEvent = calendarEventFromItem(item);
+  const relative = calEvent ? relativeWhen(calEvent.when) : '';
+  const friend = item.from ? item.from.name?.trim() || 'a friend' : undefined;
+  const place = item.place;
+  const placeText = place ? placeLabel(place) : '';
+  const placeName = place?.name?.trim() || placeText || 'Pinned spot';
+  const description = item.description?.trim();
+  // OriginalPreview already shows the description when there's no shared text.
+  const showDescription = !!description && !authorOf(item) && originalTextOf(item) !== description;
 
   const remove = async () => {
     const copy = { ...item };
@@ -57,21 +102,21 @@ export function ItemScreen({ id }: { id: string }) {
     toast('Deleted', { label: 'Undo', onClick: () => void db.items.put(copy) });
   };
 
-  const share = async () => {
-    const res = await shareLink({ title: item.title, text: item.note, url: item.url ?? '' });
-    if (res === 'copied') toast('Link copied');
-  };
-
   const refresh = async () => {
     setRefreshing(true);
     try {
-      await enrichItem(item.id, { replaceTitle: false, reclassify: false, overwrite: true });
-      toast('Preview updated');
+      const fetched = await enrichItem(item.id, REFRESH_OPTIONS);
+      if (fetched) toast('Preview updated');
+      else toast(navigator.onLine === false ? "You're offline — try again when you're back online." : "Couldn't fetch a preview right now.");
     } catch {
       toast("Couldn't fetch a preview");
     } finally {
       setRefreshing(false);
     }
+  };
+
+  const addToCalendar = () => {
+    if (calEvent && !downloadIcs(icsFileName(item.title), toIcs([calEvent]))) toast("Couldn't create the calendar file");
   };
 
   return (
@@ -83,11 +128,9 @@ export function ItemScreen({ id }: { id: string }) {
             <ArrowLeft size={20} />
           </button>
           <span className="spacer" />
-          {item.url?.startsWith('http') && (
-            <button className="icon-btn on-image" aria-label="Share" onClick={share}>
-              <Share2 size={18} />
-            </button>
-          )}
+          <button className="icon-btn on-image" aria-label="Share" onClick={() => setSharing(true)}>
+            <Share2 size={18} />
+          </button>
           <button className="icon-btn on-image" aria-label="Delete" onClick={remove}>
             <Trash2 size={18} />
           </button>
@@ -104,13 +147,32 @@ export function ItemScreen({ id }: { id: string }) {
             </option>
           ))}
         </select>
-        {from && <span>{from}</span>}
-        <span>· saved {timeAgo(item.createdAt)}</span>
+        {/* Dots separate these; one that would start a wrapped line is clipped (see .dots). */}
+        <span className="item-meta-facts dots">
+          {from && (
+            <span className="item-meta-source dot">
+              <SourceIcon source={item.source} size={18} />
+              <span>{from}</span>
+            </span>
+          )}
+          <span className="dot">saved {timeAgo(item.createdAt)}</span>
+          {relative && (
+            <span className="item-meta-when dot">
+              <CalendarDays size={14} aria-hidden /> {relative}
+            </span>
+          )}
+        </span>
+        {friend && (
+          <span className="pill item-from" title={item.from && Number.isFinite(item.from.at) ? `Added ${dayLabel(item.from.at)}` : undefined}>
+            <Users size={13} aria-hidden />
+            <span>Shared by {friend}</span>
+          </span>
+        )}
       </div>
 
-      {item.url && (
-        <a className="btn block primary" href={item.url} target="_blank" rel="noreferrer" style={{ marginBottom: 12 }}>
-          <ExternalLink size={18} /> Open {from ? `in ${from}` : 'link'}
+      {href && (
+        <a className="btn block primary" href={href} target="_blank" rel="noreferrer" style={{ marginBottom: 12 }}>
+          <ExternalLink size={18} /> Open {openLabel}
         </a>
       )}
 
@@ -139,6 +201,64 @@ export function ItemScreen({ id }: { id: string }) {
         </div>
       )}
 
+      <OriginalPreview item={item} />
+
+      <h2 className="section-title">When</h2>
+      {calEvent ? (
+        <>
+          <WhenBadge when={calEvent.when} variant="inline" />
+          {calEvent.when.source && <p className="hint when-source">From “{calEvent.when.source}”</p>}
+          <div className="row" style={{ marginTop: 10 }}>
+            <button className="btn small outline" onClick={() => setDating(true)}>
+              <Pencil size={16} /> Change
+            </button>
+            <a className="btn small outline" href={googleCalendarUrl(calEvent)} target="_blank" rel="noreferrer">
+              <CalendarPlus size={16} /> Google Calendar
+            </a>
+            <button className="btn small outline" onClick={addToCalendar}>
+              <Download size={16} /> Add to calendar (.ics)
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <button className="btn outline small" onClick={() => setDating(true)}>
+            <CalendarDays size={16} /> Add a date
+          </button>
+          {suggestion && <p className="hint">Spotted in the post: {formatWhen(suggestion)}</p>}
+        </>
+      )}
+
+      <h2 className="section-title">Location</h2>
+      {place ? (
+        <>
+          <div className="place-head">
+            <span className="place-flag" aria-hidden>
+              {flagEmoji(placeCountryCode(place), '📍')}
+            </span>
+            <strong>{placeName}</strong>
+            {placeText && placeText !== placeName && <span className="place-sub">{placeText}</span>}
+          </div>
+          <MiniMap place={place} item={item} onClick={() => setPlacing(true)} />
+          {place.address && place.address !== placeName && <p className="hint">{place.address}</p>}
+          <div className="row" style={{ marginTop: 10 }}>
+            <a className="btn small outline" href={directionsLink(place)} target="_blank" rel="noreferrer">
+              <Navigation size={16} /> Directions
+            </a>
+            <button className="btn small outline" onClick={() => showOnMap(item.id)}>
+              <MapPin size={16} /> On my map
+            </button>
+            <button className="btn small outline" onClick={() => setPlacing(true)}>
+              <Pencil size={16} /> Change
+            </button>
+          </div>
+        </>
+      ) : (
+        <button className="btn outline small" onClick={() => setPlacing(true)}>
+          <MapPin size={16} /> Add a location
+        </button>
+      )}
+
       <h2 className="section-title">Tags</h2>
       <TagInput tags={item.tags} onChange={(t) => updateItem(item.id, { tags: t })} suggestions={tags.map((t) => t.tag)} />
 
@@ -164,29 +284,6 @@ export function ItemScreen({ id }: { id: string }) {
         )}
       </div>
 
-      <h2 className="section-title">Location</h2>
-      {item.place ? (
-        <>
-          <MiniMap place={item.place} item={item} onClick={() => setPlacing(true)} />
-          {item.place.address && <p className="hint">{item.place.address}</p>}
-          <div className="row" style={{ marginTop: 10 }}>
-            <a className="btn small outline" href={directionsLink(item.place)} target="_blank" rel="noreferrer">
-              <Navigation size={16} /> Directions
-            </a>
-            <button className="btn small outline" onClick={() => navigate('/map')}>
-              <MapPin size={16} /> On my map
-            </button>
-            <button className="btn small outline" onClick={() => setPlacing(true)}>
-              <Pencil size={16} /> Change
-            </button>
-          </div>
-        </>
-      ) : (
-        <button className="btn outline small" onClick={() => setPlacing(true)}>
-          <MapPin size={16} /> Add a location
-        </button>
-      )}
-
       <h2 className="section-title">Notes</h2>
       <EditableText
         className="textarea note-area"
@@ -197,10 +294,10 @@ export function ItemScreen({ id }: { id: string }) {
         onSave={(note) => updateItem(item.id, { note: note.trim() || undefined })}
       />
 
-      {item.description && (
+      {showDescription && (
         <>
           <h2 className="section-title">From the page</h2>
-          <p className="description">{item.description}</p>
+          <p className="description">{description}</p>
         </>
       )}
 
@@ -217,6 +314,14 @@ export function ItemScreen({ id }: { id: string }) {
 
       <ReviewSheet item={item} open={reviewing} onClose={() => setReviewing(false)} />
       <PlacePicker item={item} open={placing} onClose={() => setPlacing(false)} />
+      <WhenEditor
+        open={dating}
+        value={item.when}
+        suggestion={suggestion}
+        onSave={(when) => void updateItem(item.id, { when })}
+        onClose={() => setDating(false)}
+      />
+      <ShareSheet open={sharing} onClose={() => setSharing(false)} target={{ kind: 'item', item }} />
     </div>
   );
 }

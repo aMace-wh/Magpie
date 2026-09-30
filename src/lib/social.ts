@@ -229,11 +229,19 @@ export function shareMessage(payload: SharedPayloadV2, magpieUrl?: string, opts:
   return truncate(build(140, 0, false), max);
 }
 
-/** Text for when the share goes as a file instead of a link. */
-export function fileMessage(payload: SharedPayloadV2): string {
+/**
+ * Text for when the share goes as a file instead of a link: what it is, where to get Magpie (`appUrl`) and how to
+ * open the file on a phone, where tapping it doesn't open Magpie.
+ */
+export function fileMessage(payload: SharedPayloadV2, appUrl?: string): string {
   const n = payload.items.length;
-  const what = payload.kind === 'item' ? `“${payloadTitle(payload)}”` : `${payloadEmoji(payload)} ${payloadTitle(payload)} (${n} ${n === 1 ? 'save' : 'saves'})`;
-  return `I'm sending you ${what} from my Magpie — open the attached file with Magpie to add it.`;
+  const single = payload.kind === 'item';
+  const what = single ? `“${payloadTitle(payload)}”` : `${payloadEmoji(payload)} ${payloadTitle(payload)} (${n} ${n === 1 ? 'save' : 'saves'})`;
+  const app = safeUrl(appUrl);
+  return (
+    `I'm sending you ${what} from my Magpie. To add ${single || n === 1 ? 'it' : 'them'}, open Magpie${app ? ` (${app})` : ''} → Settings → ` +
+    "Add a friend's share → Open a share file, and pick the attached file. On Android you can also share the file straight to Magpie."
+  );
 }
 
 // ---------------------------------------------------------------------------

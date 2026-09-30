@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildItem } from './db';
 import {
+  appUrl,
   backupToPayload,
   decodeShare,
   decodeShareInput,
@@ -8,6 +9,7 @@ import {
   getDeviceId,
   isWhenString,
   LINK_BUDGET,
+  MAX_SHARE_ITEMS,
   normalizePayload,
   parseShareInput,
   payloadEmoji,
@@ -18,6 +20,7 @@ import {
   shareItem,
   shareLibrary,
   shareUrl,
+  shortHash,
   slimPayload,
   slugify,
   toShared,
@@ -183,8 +186,8 @@ describe('v2 round trips', () => {
     const p = shareLibrary([a, b, loose], cols, { from: 'Sam' });
     expect(p.kind).toBe('library');
     expect(p.collections).toEqual([
-      { key: '0', name: 'Weekend in Lisbon', emoji: '🇵🇹', color: '#0ea5a4' },
-      { key: '1', name: 'Events', emoji: '🎟️', color: '#0ea5a4' },
+      { key: '0', name: 'Weekend in Lisbon', emoji: '🇵🇹', color: '#0ea5a4', id: shortHash(cols[0].id) },
+      { key: '1', name: 'Events', emoji: '🎟️', color: '#0ea5a4', id: shortHash('c3') },
     ]);
     expect(p.items.map((i) => i.c)).toEqual([['0'], ['0', '1'], undefined]);
     const back = await decodeShare(await encodeShare(p));
@@ -496,5 +499,68 @@ describe('titles', () => {
     const c = shareCollection(col(), []);
     expect(payloadTitle(c)).toBe('Weekend in Lisbon');
     expect(payloadEmoji(c)).toBe('🇵🇹');
+  });
+});
+
+describe('privacy and safety of what goes out', () => {
+  it("takes per-sharer tracking tokens out of links and the original post, and leaves clean links as they are", () => {
+    const reel = buildItem({
+      title: 'Reel',
+      type: 'video',
+      url: 'https://www.instagram.com/reel/x/?igsh=TOKEN123&utm_source=ig_web',
+      sharedText: 'So good! https://www.instagram.com/reel/x/?igsh=TOKEN123. Also https://youtu.be/abc?si=XYZ&t=42',
+    });
+    const [s] = shareItem(reel).items;
+    expect(s.u).toBe('https://www.instagram.com/reel/x/');
+    expect(s.x).toBe('So good! https://www.instagram.com/reel/x/. Also https://youtu.be/abc?t=42');
+    const clean = buildItem({ title: 'Clean', type: 'link', url: 'https://example.com/a?b=1&c=%20', sharedText: 'see https://example.com/a?b=1' });
+    expect(shareItem(clean).items[0]).toMatchObject({ u: 'https://example.com/a?b=1&c=%20', x: 'see https://example.com/a?b=1' });
+  });
+
+  it('gives saves without a link a short key, so they are recognised in the same friend’s other shares', () => {
+    const note = buildItem({ title: 'Pack sunscreen', type: 'note' });
+    expect(shareItem(note).items[0].k).toBe(shortHash(note.id));
+    expect(shareItem(pasteis()).items[0].k).toBeUndefined();
+  });
+
+  it('leaves text notes out of a library share unless notes are included; a collection or a single note keeps them', () => {
+    vi.stubGlobal('localStorage', memoryStorage());
+    const secret = buildItem({ title: 'Door code 4821', type: 'note', note: 'wifi pass hunter2' });
+    const items = [pasteis(), secret];
+    expect(shareLibrary(items, []).items.map((i) => i.n)).toEqual(['Pastéis de Belém']);
+    expect(shareLibrary(items, [], { includePersonal: true }).items.map((i) => i.n)).toEqual(['Pastéis de Belém', 'Door code 4821']);
+    expect(shareCollection(col(), items).items.map((i) => i.n)).toEqual(['Pastéis de Belém', 'Door code 4821']);
+    expect(shareItem(secret).items[0]).toMatchObject({ n: 'Door code 4821', d: 'wifi pass hunter2' });
+  });
+
+  it('sends at most MAX_SHARE_ITEMS saves, and says how many a bigger share had when opening it', () => {
+    vi.stubGlobal('localStorage', memoryStorage());
+    const many = Array.from({ length: MAX_SHARE_ITEMS + 5 }, (_, i) => buildItem({ title: `Link ${i}`, type: 'link', url: `https://ex.example/${i}` }));
+    const p = shareLibrary(many, []);
+    expect(p.items).toHaveLength(MAX_SHARE_ITEMS);
+    expect(p.items[0].n).toBe('Link 0');
+    const big = normalizePayload({ ...p, items: many.map((i) => ({ t: 'link', n: i.title, u: i.url })) });
+    expect(big.items).toHaveLength(MAX_SHARE_ITEMS);
+    expect(big.total).toBe(MAX_SHARE_ITEMS + 5);
+    expect(normalizePayload(p).total).toBeUndefined();
+  });
+
+  it('drops sources that are not plain ids (e.g. "__proto__")', () => {
+    const p = normalizePayload({
+      v: 2,
+      kind: 'collection',
+      shareId: 'c:x',
+      items: [
+        { t: 'link', n: 'A', s: '__proto__' },
+        { t: 'link', n: 'B', s: 'constructor' },
+        { t: 'link', n: 'C', s: 'google-maps' },
+        { t: 'link', n: 'D', s: 'Not An Id!' },
+      ],
+    });
+    expect(p.items.map((i) => i.s)).toEqual([undefined, 'constructor', 'google-maps', undefined]);
+  });
+
+  it('knows the app address without the route', () => {
+    expect(appUrl('https://me.example/magpie/?x=1#/import/zabc')).toBe('https://me.example/magpie/');
   });
 });

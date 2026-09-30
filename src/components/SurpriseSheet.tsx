@@ -4,7 +4,9 @@ import { hostOf, sourceLabel } from '../lib/classify';
 import { navigate } from '../lib/router';
 import { TYPE_INFO, type Item } from '../lib/types';
 import { Sheet } from './Sheet';
+import { SourceIcon } from './SourceIcon';
 import { Thumb } from './Thumb';
+import { WhenBadge } from './WhenBadge';
 
 function pick(items: Item[], not?: string): Item | undefined {
   const pool = items.length > 1 ? items.filter((i) => i.id !== not) : items;
@@ -65,7 +67,9 @@ export function SurpriseSheet({ items, open, onClose }: { items: Item[]; open: b
             <h3 className="card-title" style={{ fontSize: 19 }}>
               {current.title}
             </h3>
+            {current.when && <WhenBadge when={current.when} variant="inline" />}
             <div className="card-meta">
+              {current.source && <SourceIcon source={current.source} size={14} />}
               <span>{sourceLabel(current.source) ?? current.siteName ?? (hostOf(current.url) || info.label)}</span>
             </div>
             {current.note && <p className="description" style={{ margin: 0 }}>{current.note}</p>}

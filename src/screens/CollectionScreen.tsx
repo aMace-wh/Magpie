@@ -1,19 +1,25 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, ListPlus, Pencil, Plus, Share2, Trash2, Zap } from 'lucide-react';
+import { ArrowLeft, CalendarPlus, ListPlus, Pencil, Plus, Share2, Trash2, Users, Zap } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { CollectionEditor } from '../components/CollectionEditor';
+import { CountryGroups } from '../components/CountryGroups';
 import { Filters } from '../components/Filters';
 import { ItemGrid } from '../components/ItemCard';
 import { ItemPicker } from '../components/ItemPicker';
+import { ShareSheet } from '../components/ShareSheet';
 import { SurpriseSheet } from '../components/SurpriseSheet';
 import { useToast } from '../components/Toast';
+import { calendarEventFromItem, downloadIcs, toIcs, type CalendarEvent } from '../lib/calendar';
 import { db, deleteCollection } from '../lib/db';
 import { filterItems, type ItemFilter } from '../lib/filter';
 import { plural } from '../lib/format';
 import { goBack, navigate } from '../lib/router';
-import { encodeShare, shareUrl, toShared } from '../lib/share';
-import { shareLink } from '../lib/shareSheet';
 import { describeRules, itemsInCollection } from '../lib/smart';
+
+type View = 'grid' | 'country';
+
+// Remembered per collection for the session, so coming back from a save keeps the same view.
+const views = new Map<string, View>();
 
 export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collectionId?: string) => void }) {
   const toast = useToast();
@@ -24,9 +30,19 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
   const [editing, setEditing] = useState(false);
   const [picking, setPicking] = useState(false);
   const [surprise, setSurprise] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [view, setViewState] = useState<View>(() => views.get(id) ?? 'grid');
 
   const items = useMemo(() => (collection && all ? itemsInCollection(all, collection) : []), [all, collection]);
   const shown = useMemo(() => filterItems(items, filter), [items, filter]);
+  const events = useMemo(() => items.map(calendarEventFromItem).filter((e): e is CalendarEvent => !!e), [items]);
+  const hasPlaces = items.some((i) => i.place);
+  const byCountry = view === 'country' && hasPlaces;
+
+  const setView = (v: View) => {
+    views.set(id, v);
+    setViewState(v);
+  };
 
   if (collection === undefined || all === undefined) return null;
   if (collection === null) {
@@ -41,12 +57,14 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
     );
   }
 
-  const share = async () => {
+  const share = () => {
     if (!items.length) return toast('Add some saves before sharing.');
-    const url = shareUrl(await encodeShare(toShared(collection, items)));
-    const res = await shareLink({ title: `${collection.emoji} ${collection.name}`, text: `My "${collection.name}" list on Magpie`, url });
-    if (res === 'copied') toast('Share link copied');
-    if (res === 'failed') toast("Couldn't share this collection");
+    setSharing(true);
+  };
+
+  const addToCalendar = () => {
+    const ok = downloadIcs(collection.name, toIcs(events, { name: `${collection.emoji} ${collection.name}` }));
+    toast(ok ? `Calendar file saved — ${plural(events.length, 'event')}` : "Couldn't make the calendar file");
   };
 
   const remove = async () => {
@@ -57,6 +75,7 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
   };
 
   const todo = items.filter((i) => i.status === 'todo').length;
+  const sharedBy = collection.from ? collection.from.name?.trim() || 'a friend' : undefined;
 
   return (
     <>
@@ -75,6 +94,11 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
         </button>
       </header>
       <p className="subtitle">
+        {sharedBy && (
+          <>
+            <Users size={12} aria-hidden /> Shared by {sharedBy} ·{' '}
+          </>
+        )}
         {collection.kind === 'smart' && (
           <>
             <Zap size={12} fill="currentColor" /> {describeRules(collection.rules!)} ·{' '}
@@ -107,8 +131,35 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
         </div>
       ) : (
         <>
+          {(hasPlaces || events.length > 0) && (
+            <div className="row col-view">
+              {hasPlaces && (
+                <div className="segmented" role="group" aria-label="View">
+                  <button aria-pressed={!byCountry} onClick={() => setView('grid')}>
+                    Grid
+                  </button>
+                  <button aria-pressed={byCountry} onClick={() => setView('country')}>
+                    By country
+                  </button>
+                </div>
+              )}
+              <span className="spacer" />
+              {events.length > 0 && (
+                <button className="btn small outline" onClick={addToCalendar} title={`Download ${plural(events.length, 'dated save')} as an .ics file`}>
+                  <CalendarPlus size={16} /> Add to calendar
+                </button>
+              )}
+            </div>
+          )}
           <Filters items={items} filter={filter} onChange={setFilter} onSurprise={() => setSurprise(true)} />
-          <ItemGrid items={shown} />
+          {byCountry ? (
+            <CountryGroups
+              items={shown}
+              emptyText={shown.length ? 'Nothing here has a location yet.' : 'Nothing matches these filters.'}
+            />
+          ) : (
+            <ItemGrid items={shown} />
+          )}
         </>
       )}
 
@@ -121,6 +172,7 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
       <CollectionEditor open={editing} collection={collection} onClose={() => setEditing(false)} />
       <ItemPicker open={picking} collection={collection} onClose={() => setPicking(false)} />
       <SurpriseSheet items={shown} open={surprise} onClose={() => setSurprise(false)} />
+      <ShareSheet open={sharing} onClose={() => setSharing(false)} target={{ kind: 'collection', collection, items }} />
     </>
   );
 }

@@ -4,6 +4,7 @@ import {
   classify,
   cleanTitle,
   extractUrl,
+  handedText,
   hashtags,
   itemFieldsFrom,
   normalizeTag,
@@ -12,9 +13,40 @@ import {
   parseShared,
   sharedTextOf,
   sourceLabel,
+  stripTracking,
+  stripTrackingInText,
   titleFromUrl,
   youtubeId,
 } from './classify';
+
+describe('sourceLabel', () => {
+  it('only looks up its own names, so prototype keys stay plain text', () => {
+    expect(sourceLabel('youtube')).toBe('YouTube');
+    expect(sourceLabel('somewhere')).toBe('somewhere');
+    expect(sourceLabel(undefined)).toBeUndefined();
+    for (const key of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) expect(sourceLabel(key)).toBe(key);
+  });
+});
+
+describe('stripTracking', () => {
+  it('removes per-sharer tracking parameters and keeps everything else', () => {
+    expect(stripTracking('https://www.instagram.com/reel/x/?igsh=abc')).toBe('https://www.instagram.com/reel/x/');
+    expect(stripTracking('https://youtu.be/abc?si=XYZ&t=42')).toBe('https://youtu.be/abc?t=42');
+    expect(stripTracking('https://www.tiktok.com/@a/video/1?_t=8x&_r=1&is_from_webapp=1&sender_device=pc')).toBe('https://www.tiktok.com/@a/video/1');
+    expect(stripTracking('https://shop.example/p?id=5&utm_source=x&UTM_Medium=y')).toBe('https://shop.example/p?id=5');
+    // No tracking: exactly as it was.
+    expect(stripTracking('https://Example.com/a?b=1&c=%20')).toBe('https://Example.com/a?b=1&c=%20');
+    expect(stripTracking('not a url ?si=1')).toBe('not a url ?si=1');
+    expect(stripTracking('geo:1,2?si=3')).toBe('geo:1,2?si=3');
+  });
+
+  it('cleans every link in a text, leaving trailing punctuation alone', () => {
+    expect(stripTrackingInText('Look (https://a.example/x?fbclid=1), and https://b.example/?igshid=2!')).toBe(
+      'Look (https://a.example/x), and https://b.example/!',
+    );
+    expect(stripTrackingInText('no links')).toBe('no links');
+  });
+});
 
 describe('extractUrl / normalizeUrl', () => {
   it('finds a link inside shared text and trims trailing punctuation', () => {
@@ -683,5 +715,23 @@ describe('reason wording', () => {
     expect(classify({ text: 'Film festival this weekend in Soho' }).reasons).toContain('mentions film festival');
     // A weak word is still shown when it's the only one.
     expect(classify({ text: 'Party tonight' })).toMatchObject({ type: 'event', reasons: ['has a date: tonight', 'mentions party'] });
+  });
+});
+
+describe('handedText', () => {
+  it('keeps only what other apps handed over, never words typed in the box', () => {
+    const url = 'https://www.amazon.co.uk/dp/B0TEST';
+    // Typed around a pasted link: only the link is the "original".
+    expect(handedText(`Lego set\nfor Anna's birthday, don't tell her\n${url}`, [url])).toBe(url);
+    // Typed entirely: nothing.
+    expect(handedText('Jazz night this Saturday 8pm', [])).toBeUndefined();
+    // A caption pasted, then a note typed after it.
+    const caption = 'Creamy garlic pasta 🍝 #pasta\r\nhttps://vm.tiktok.com/ZMabc/';
+    expect(handedText(`Creamy garlic pasta 🍝 #pasta\nhttps://vm.tiktok.com/ZMabc/\nmake for Sunday`, [caption])).toBe('Creamy garlic pasta 🍝 #pasta\nhttps://vm.tiktok.com/ZMabc/');
+    // Pasted, then deleted from the box: gone.
+    expect(handedText('something else', ['https://a.example/'])).toBeUndefined();
+    // Two pastes, and a bigger one containing an earlier one.
+    expect(handedText('a https://a.example/ b https://b.example/', ['https://a.example/', 'https://b.example/'])).toBe('https://a.example/\nhttps://b.example/');
+    expect(handedText('see https://a.example/ now', ['https://a.example/', 'see https://a.example/ now'])).toBe('see https://a.example/ now');
   });
 });

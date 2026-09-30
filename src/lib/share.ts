@@ -1,3 +1,4 @@
+import { SOURCE_ID_RE, stripTracking, stripTrackingInText } from './classify';
 import { findSharePayload } from './receive';
 import { itemsInCollection } from './smart';
 import { ITEM_TYPES, TYPE_INFO, type Collection, type Item, type ItemType, type Place, type SmartRules, type Status, type When } from './types';
@@ -62,6 +63,7 @@ export interface SharedItemV2 extends SharedItem {
   w?: Pick<When, 'start' | 'end'>;
   x?: string; // sharedText — the original post / message
   c?: string[]; // collection keys (library only)
+  k?: string; // sender's key for a save without a link, so it's recognised in their other shares
   // Personal — only when the sender opted in:
   r?: number; // rating
   rv?: string; // review
@@ -73,6 +75,8 @@ export interface SharedCollectionRef {
   name: string;
   emoji: string;
   color: string;
+  /** Short fingerprint of the sender's collection id (shareId), so it merges with the same collection shared on its own. */
+  id?: string;
 }
 
 export interface SharedPayloadV2 {
@@ -88,6 +92,8 @@ export interface SharedPayloadV2 {
   /** Library only. */
   collections?: SharedCollectionRef[];
   items: SharedItemV2[];
+  /** Set on decoding when the share held more saves than can be added at once (only the first ones are kept). */
+  total?: number;
 }
 
 export interface ShareOptions {
@@ -97,7 +103,9 @@ export interface ShareOptions {
 }
 
 const KINDS: ShareKind[] = ['item', 'collection', 'library'];
-const MAX_ITEMS = 2000;
+/** Most saves one share can carry (a library share sends the first ones — the newest, as the app lists them). */
+export const MAX_SHARE_ITEMS = 2000;
+const MAX_ITEMS = MAX_SHARE_ITEMS;
 const MAX_COLLECTIONS = 200;
 const NOT_A_SHARE = "That isn't a Magpie share.";
 
@@ -115,7 +123,9 @@ function compactPlace(p: Place | undefined): Place | undefined {
 
 function compactItem(item: Item, opts: ShareOptions, keys?: string[]): SharedItemV2 {
   const s: SharedItemV2 = { t: item.type, n: item.title };
-  if (item.url) s.u = item.url;
+  // Links go without the sharer's tracking tokens (igsh, si, utm_*…), which could tie your friends back to you.
+  if (item.url) s.u = stripTracking(item.url);
+  else s.k = shortHash(item.id);
   // For a note the note *is* the content; otherwise it's personal.
   if (item.note && (opts.includePersonal || item.type === 'note')) s.d = item.note;
   if (item.description) s.ds = item.description;
@@ -126,7 +136,7 @@ function compactItem(item: Item, opts: ShareOptions, keys?: string[]): SharedIte
   if (place) s.p = place;
   if (item.source) s.s = item.source;
   if (item.when?.start) s.w = item.when.end ? { start: item.when.start, end: item.when.end } : { start: item.when.start };
-  if (item.sharedText) s.x = item.sharedText;
+  if (item.sharedText) s.x = stripTrackingInText(item.sharedText);
   if (keys?.length) s.c = keys;
   if (opts.includePersonal) {
     if (item.status === 'done') s.st = 'done';
@@ -137,6 +147,14 @@ function compactItem(item: Item, opts: ShareOptions, keys?: string[]): SharedIte
 }
 
 const cleanFrom = (from: string | undefined) => clip(from?.trim(), 60);
+
+/**
+ * Text-note saves are your own words (door codes, gift ideas…): a whole-library share only carries them when you
+ * include your notes. A note shared on purpose — on its own or in a collection you picked — always goes.
+ */
+function withoutPrivateNotes(items: Item[], opts: ShareOptions): Item[] {
+  return opts.includePersonal ? items : items.filter((i) => i.type !== 'note');
+}
 
 export function shareItem(item: Item, opts: ShareOptions = {}): SharedPayloadV2 {
   const p: SharedPayloadV2 = { v: 2, kind: 'item', shareId: `i:${item.id}`, items: [compactItem(item, opts)] };
@@ -164,10 +182,11 @@ function buildLibrary(items: Item[], collections: Collection[], opts: ShareOptio
   const keysByItem = new Map<string, string[]>();
   const refs: SharedCollectionRef[] = [];
   for (const c of collections) {
+    if (refs.length >= MAX_COLLECTIONS) break;
     const members = itemsInCollection(items, c);
     if (!members.length) continue; // empty collections would just be clutter for your friend
     const key = refs.length.toString(36);
-    refs.push({ key, name: c.name, emoji: c.emoji, color: c.color });
+    refs.push({ key, name: c.name, emoji: c.emoji, color: c.color, id: shortHash(c.id) });
     for (const m of members) keysByItem.set(m.id, [...(keysByItem.get(m.id) ?? []), key]);
   }
   const p: SharedPayloadV2 = {
@@ -182,9 +201,12 @@ function buildLibrary(items: Item[], collections: Collection[], opts: ShareOptio
   return p;
 }
 
-/** Your whole library (or any selection of it) with the collections the items are in. */
+/**
+ * Your whole library (or any selection of it) with the collections the items are in. Text notes stay out unless
+ * `includePersonal`, and only the first MAX_SHARE_ITEMS saves go (pass them newest first).
+ */
 export function shareLibrary(items: Item[], collections: Collection[], opts: ShareOptions = {}): SharedPayloadV2 {
-  return buildLibrary(items, collections, opts, `l:${getDeviceId()}`);
+  return buildLibrary(withoutPrivateNotes(items, opts).slice(0, MAX_ITEMS), collections, opts, `l:${getDeviceId()}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +317,14 @@ export function shareUrl(payload: string, base = location.href): string {
   return u.toString();
 }
 
+/** The address of the app itself (no route), e.g. to tell a friend where to get Magpie. */
+export function appUrl(base = location.href): string {
+  const u = new URL(base);
+  u.search = '';
+  u.hash = '';
+  return u.toString();
+}
+
 // ---------------------------------------------------------------------------
 // Validation / normalisation (structure only — transfer.ts sanitises values again on import)
 
@@ -374,9 +404,10 @@ function cleanItem(raw: unknown, library: boolean): SharedItemV2 | undefined {
   set('sn', clip(raw.sn, 100));
   set('g', strList(raw.g, 30, 60));
   set('p', cleanPlace(raw.p));
-  set('s', clip(raw.s, 40));
+  if (typeof raw.s === 'string' && SOURCE_ID_RE.test(raw.s)) s.s = raw.s;
   set('w', cleanWhen(raw.w));
   set('x', clip(raw.x, 5000));
+  if (typeof raw.k === 'string' && ITEM_KEY_RE.test(raw.k)) s.k = raw.k;
   if (library) set('c', strList(raw.c, 50, 24));
   if (typeof raw.r === 'number' && Number.isFinite(raw.r)) s.r = raw.r;
   set('rv', clip(raw.rv, 5000));
@@ -387,9 +418,11 @@ function cleanItem(raw: unknown, library: boolean): SharedItemV2 | undefined {
 const COLOR_RE = /^#[0-9a-f]{3,8}$/i;
 const SHARE_ID_RE = /^[A-Za-z0-9:_.-]{1,200}$/;
 const KEY_RE = /^[A-Za-z0-9_-]{1,24}$/;
+/** A shortHash: save keys (SharedItemV2.k) and collection fingerprints (SharedCollectionRef.id). */
+const ITEM_KEY_RE = /^[a-z0-9]{1,13}$/;
 
-/** Short, stable, non-cryptographic hash (FNV-1a) — for deriving ids of shares that don't carry one. */
-function hash(s: string): string {
+/** Short, stable, non-cryptographic hash (FNV-1a) — for ids of shares that don't carry one, save keys and collection fingerprints. */
+export function shortHash(s: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
@@ -408,7 +441,7 @@ export function normalizePayload(raw: unknown): SharedPayloadV2 {
       v: 2,
       kind: 'collection',
       // v1 links carry no id: derive one from the content so opening the same link twice doesn't duplicate.
-      shareId: `v1:${hash(JSON.stringify(raw))}`,
+      shareId: `v1:${shortHash(JSON.stringify(raw))}`,
       name: clip(raw.name, 80) ?? 'Shared collection',
       items,
     };
@@ -428,9 +461,10 @@ export function normalizePayload(raw: unknown): SharedPayloadV2 {
   const p: SharedPayloadV2 = {
     v: 2,
     kind,
-    shareId: typeof raw.shareId === 'string' && SHARE_ID_RE.test(raw.shareId) ? raw.shareId : `h:${hash(JSON.stringify(raw.items))}`,
+    shareId: typeof raw.shareId === 'string' && SHARE_ID_RE.test(raw.shareId) ? raw.shareId : `h:${shortHash(JSON.stringify(raw.items))}`,
     items,
   };
+  if (kind !== 'item' && raw.items.length > MAX_ITEMS) p.total = raw.items.length;
   const from = clip(typeof raw.from === 'string' ? raw.from.trim() : undefined, 60);
   const name = clip(raw.name, 80);
   const emoji = clip(raw.emoji, 8);
@@ -444,12 +478,14 @@ export function normalizePayload(raw: unknown): SharedPayloadV2 {
     for (const c of raw.collections.slice(0, MAX_COLLECTIONS)) {
       if (!isObj(c) || typeof c.key !== 'string' || !KEY_RE.test(c.key) || seen.has(c.key)) continue;
       seen.add(c.key);
-      refs.push({
+      const ref: SharedCollectionRef = {
         key: c.key,
         name: clip(c.name, 80) ?? 'Collection',
         emoji: clip(c.emoji, 8) ?? '📌',
         color: typeof c.color === 'string' && COLOR_RE.test(c.color) ? c.color : '',
-      });
+      };
+      if (typeof c.id === 'string' && ITEM_KEY_RE.test(c.id)) ref.id = c.id;
+      refs.push(ref);
     }
     if (refs.length) p.collections = refs;
     // Drop references to collections that aren't in the share.
@@ -622,7 +658,7 @@ export function backupToPayload(raw: unknown): SharedPayloadV2 {
     ? raw.collections.map(coerceCollection).filter((c): c is Collection => !!c)
     : [];
   // Same backup file → same id, so opening it twice merges.
-  const id = `b:${hash(`${String(raw.exportedAt ?? '')}|${items.length}|${items.map((i) => i.id).join(',')}`)}`;
+  const id = `b:${shortHash(`${String(raw.exportedAt ?? '')}|${items.length}|${items.map((i) => i.id).join(',')}`)}`;
   return normalizePayload(buildLibrary(items, collections, { includePersonal: true }, id));
 }
 

@@ -28,12 +28,12 @@
   white-space: nowrap;
 }
 
-.when-badge.card {
+.when-badge--card {
   padding: 2px 7px;
   font-size: 11px;
 }
 
-.when-badge.inline {
+.when-badge--inline {
   padding: 4px 10px;
   font-size: 13px;
 }

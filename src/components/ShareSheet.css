@@ -93,7 +93,8 @@
 
 .ss-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+  /* Wide enough for "WhatsApp" / "Telegram" in the 7-column desktop dialog. */
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
   gap: 4px;
 }
 
@@ -199,7 +200,8 @@
   line-height: 1.15;
 }
 
-.imp-from {
+/* (.hero p sets a left-aligned max width; these stay centred on wide screens too.) */
+.hero .imp-from {
   position: relative;
   margin: 6px auto 4px;
   font-size: 14px;
@@ -230,10 +232,52 @@
   justify-content: center;
 }
 
-.imp-cols {
+.chips.wrap.imp-cols {
   position: relative;
   justify-content: center;
   margin: 0 0 16px;
+}
+
+/* The main action comes first in the markup, so when the buttons wrap it stays on top. */
+.imp-hero .row.imp-actions {
+  flex-direction: row-reverse;
+}
+
+/* "Using Magpie from your Home Screen? …" */
+.imp-elsewhere {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 10px;
+  max-width: 520px;
+  margin: 0 auto 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.imp-elsewhere > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.imp-elsewhere .grow {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.imp-elsewhere strong,
+.imp-elsewhere span {
+  display: block;
+}
+
+.imp-elsewhere .btn {
+  margin-left: auto;
 }
 
 .imp-toolbar {
@@ -326,7 +370,7 @@
   overflow: auto;
 }
 
-.imp-own {
+.hero .imp-own {
   position: relative;
   margin: -6px auto 14px;
   font-size: 13px;
