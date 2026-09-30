@@ -5,10 +5,12 @@ export interface Settings {
   previews: boolean;
   theme: 'system' | 'light' | 'dark';
   onboarded: boolean;
+  /** Shown to friends when you share ("From Sam"). */
+  name: string;
 }
 
 const KEY = 'magpie:settings';
-const DEFAULTS: Settings = { previews: true, theme: 'system', onboarded: false };
+const DEFAULTS: Settings = { previews: true, theme: 'system', onboarded: false, name: '' };
 
 let current: Settings = load();
 const listeners = new Set<() => void>();

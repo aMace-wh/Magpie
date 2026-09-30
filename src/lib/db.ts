@@ -12,6 +12,11 @@ db.version(1).stores({
   items: 'id, type, status, createdAt, updatedAt, doneAt, *tags, *collectionIds',
   collections: 'id, createdAt, name',
 });
+// v2: events (`when`), place countries and friend shares. New fields are optional, so no data migration.
+db.version(2).stores({
+  items: 'id, type, status, createdAt, updatedAt, doneAt, *tags, *collectionIds, when.start, place.countryCode',
+  collections: 'id, createdAt, name, from.shareId',
+});
 
 // ---------------------------------------------------------------------------
 // Items

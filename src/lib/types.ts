@@ -8,6 +8,7 @@ export type ItemType =
   | 'workout'
   | 'book'
   | 'music'
+  | 'event'
   | 'note';
 
 export type Status = 'todo' | 'done';
@@ -16,6 +17,31 @@ export interface Place {
   lat: number;
   lng: number;
   address?: string;
+  /** Venue / place name, e.g. "Dishoom Covent Garden". */
+  name?: string;
+  city?: string;
+  country?: string;
+  /** ISO 3166-1 alpha-2, upper case, e.g. "GB". Used for flags and grouping. */
+  countryCode?: string;
+}
+
+/**
+ * When an event / activity happens. Dates are local "floating" ISO strings:
+ * "2026-10-12" (all day) or "2026-10-12T19:30" (with a time).
+ */
+export interface When {
+  start: string;
+  end?: string;
+  /** The phrase it was read from, e.g. "Sat 12 Oct, 7:30pm". */
+  source?: string;
+}
+
+/** Who shared an item or collection with you. */
+export interface SharedFrom {
+  name?: string;
+  /** Stable id of the share, so re-importing an updated share merges instead of duplicating. */
+  shareId?: string;
+  at: number;
 }
 
 export interface Item {
@@ -40,6 +66,10 @@ export interface Item {
   review?: string;
   doneAt?: number;
   place?: Place;
+  when?: When;
+  /** Exactly what was shared or pasted, kept so you can recognise the original post. */
+  sharedText?: string;
+  from?: SharedFrom;
   createdAt: number;
   updatedAt: number;
 }
@@ -60,6 +90,7 @@ export interface Collection {
   color: string;
   kind: 'manual' | 'smart';
   rules?: SmartRules;
+  from?: SharedFrom;
   createdAt: number;
   updatedAt: number;
 }
@@ -84,6 +115,7 @@ export const TYPE_INFO: Record<ItemType, TypeInfo> = {
   workout: { label: 'Workout', plural: 'Workouts', emoji: '💪', todo: 'To try', done: 'Done', doneAction: 'I did this workout' },
   book: { label: 'Book', plural: 'Books', emoji: '📚', todo: 'To read', done: 'Read', doneAction: 'Mark as read' },
   music: { label: 'Music', plural: 'Music', emoji: '🎧', todo: 'To listen', done: 'Listened', doneAction: 'Mark as listened' },
+  event: { label: 'Event', plural: 'Events', emoji: '🎟️', todo: 'Want to go', done: 'Went', doneAction: 'I went' },
   note: { label: 'Note', plural: 'Notes', emoji: '📝', todo: 'Open', done: 'Done', doneAction: 'Mark as done' },
 };
 
