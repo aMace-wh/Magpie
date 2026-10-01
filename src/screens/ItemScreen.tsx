@@ -1,4 +1,3 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowLeft,
   CalendarDays,
@@ -16,7 +15,8 @@ import {
   Users,
   Zap,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Ago } from '../components/Ago';
 import { EditableText } from '../components/EditableText';
 import { MiniMap } from '../components/LazyMiniMap';
 import { OriginalPreview } from '../components/OriginalPreview';
@@ -35,15 +35,39 @@ import { hostOf, normalizeUrl, sourceLabel } from '../lib/classify';
 import { allTags, db, deleteItem, markTodo, toggleItemInCollection, updateItem } from '../lib/db';
 import { authorOf, embedFor, originalTextOf } from '../lib/embed';
 import { enrichItem, REFRESH_OPTIONS } from '../lib/enrich';
-import { dayLabel, timeAgo } from '../lib/format';
+import { useClock } from '../lib/clock';
+import { dayLabel } from '../lib/format';
 import { directionsLink } from '../lib/geo';
+import { useLiveQuery } from '../lib/live';
 import { flagEmoji, placeCountryCode, placeLabel } from '../lib/location';
 import { showOnMap } from '../lib/mapFocus';
 import { goBack, navigate } from '../lib/router';
 import { useSettings } from '../lib/settings';
 import { matchesRules } from '../lib/smart';
-import { ITEM_TYPES, TYPE_INFO, type Item, type ItemType } from '../lib/types';
+import { ITEM_TYPES, TYPE_INFO, type Item, type ItemType, type When } from '../lib/types';
 import { findWhen, formatWhen, relativeWhen } from '../lib/when';
+
+/** "tomorrow", "on now", "ended": where a dated save stands, kept current by the shared clock. */
+function WhenFromNow({ when }: { when: When }) {
+  const relative = useClock((now) => relativeWhen(when, new Date(now)));
+  return relative ? (
+    <span className="item-meta-when dot">
+      <CalendarDays size={14} aria-hidden /> {relative}
+    </span>
+  ) : null;
+}
+
+/** True once `active` has lasted `ms` — time to say "Still…" or show a loading state. */
+function useSlow(active: boolean, ms = 4000): boolean {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (!active) return;
+    const timer = setTimeout(() => setSlow(true), ms);
+    return () => clearTimeout(timer);
+  }, [active, ms]);
+  return active && slow;
+}
 
 export function ItemScreen({ id }: { id: string }) {
   const toast = useToast();
@@ -57,6 +81,12 @@ export function ItemScreen({ id }: { id: string }) {
   const [dating, setDating] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const slowRefresh = useSlow(refreshing);
+  // The last refresh: leaving the save cancels whatever it's still fetching.
+  const refreshCtrl = useRef<AbortController | undefined>(undefined);
+  useEffect(() => () => refreshCtrl.current?.abort(), [id]);
+  // A quiet loading state, only when opening takes a moment.
+  const slowLoad = useSlow(item === undefined, 400);
 
   // A date mentioned in the post, offered in the date editor.
   const suggestion = useMemo(() => {
@@ -64,7 +94,14 @@ export function ItemScreen({ id }: { id: string }) {
     return text ? findWhen(text)?.when : undefined;
   }, [item?.title, item?.note, item?.sharedText, item?.description]);
 
-  if (item === undefined) return null;
+  if (item === undefined) {
+    return slowLoad ? (
+      <div className="empty" role="status">
+        <span className="spinner" aria-hidden="true" />
+        <p>Opening this save…</p>
+      </div>
+    ) : null;
+  }
   if (item === null) {
     return (
       <div className="empty">
@@ -86,7 +123,6 @@ export function ItemScreen({ id }: { id: string }) {
   const manual = collections.filter((c) => c.kind === 'manual');
   const smart = collections.filter((c) => c.kind === 'smart' && c.rules && matchesRules(item, c.rules));
   const calEvent = calendarEventFromItem(item);
-  const relative = calEvent ? relativeWhen(calEvent.when) : '';
   const friend = item.from ? item.from.name?.trim() || 'a friend' : undefined;
   const place = item.place;
   const placeText = place ? placeLabel(place) : '';
@@ -103,15 +139,21 @@ export function ItemScreen({ id }: { id: string }) {
   };
 
   const refresh = async () => {
+    refreshCtrl.current?.abort();
+    const ctrl = new AbortController();
+    refreshCtrl.current = ctrl;
     setRefreshing(true);
     try {
-      const fetched = await enrichItem(item.id, REFRESH_OPTIONS);
+      // Someone's waiting: its place lookup goes ahead of background ones, and the spinner stops once
+      // the preview is in (city / country fill in after).
+      const fetched = await enrichItem(item.id, { ...REFRESH_OPTIONS, priority: 'user', signal: ctrl.signal, waitForPlace: false });
+      if (ctrl.signal.aborted) return;
       if (fetched) toast('Preview updated');
       else toast(navigator.onLine === false ? "You're offline — try again when you're back online." : "Couldn't fetch a preview right now.");
     } catch {
-      toast("Couldn't fetch a preview");
+      if (!ctrl.signal.aborted) toast("Couldn't fetch a preview");
     } finally {
-      setRefreshing(false);
+      if (refreshCtrl.current === ctrl) setRefreshing(false);
     }
   };
 
@@ -155,12 +197,10 @@ export function ItemScreen({ id }: { id: string }) {
               <span>{from}</span>
             </span>
           )}
-          <span className="dot">saved {timeAgo(item.createdAt)}</span>
-          {relative && (
-            <span className="item-meta-when dot">
-              <CalendarDays size={14} aria-hidden /> {relative}
-            </span>
-          )}
+          <span className="dot">
+            saved <Ago at={item.createdAt} />
+          </span>
+          {calEvent && <WhenFromNow when={calEvent.when} />}
         </span>
         {friend && (
           <span className="pill item-from" title={item.from && Number.isFinite(item.from.at) ? `Added ${dayLabel(item.from.at)}` : undefined}>
@@ -305,9 +345,17 @@ export function ItemScreen({ id }: { id: string }) {
       <div className="danger-zone">
         {item.url?.startsWith('http') && settings.previews && (
           <button className="btn small outline" onClick={refresh} disabled={refreshing}>
-            {refreshing ? <span className="spinner" /> : <RefreshCw size={16} />} Refresh preview
+            {refreshing ? <span className="spinner" /> : <RefreshCw size={16} />} {slowRefresh ? 'Still fetching…' : 'Refresh preview'}
           </button>
         )}
+        {slowRefresh && (
+          <button className="btn small outline" onClick={() => refreshCtrl.current?.abort()}>
+            Cancel
+          </button>
+        )}
+        <span className="sr-only" role="status">
+          {slowRefresh ? 'Still fetching the preview' : ''}
+        </span>
         <button className="btn small danger" onClick={remove}>
           <Trash2 size={16} /> Delete
         </button>

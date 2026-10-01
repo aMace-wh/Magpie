@@ -1,6 +1,6 @@
 import { classify, parsePlaceFromUrl, safeUrl } from './classify';
 import { db, uniqueTags } from './db';
-import { searchPlaces, type GeoResult } from './geo';
+import { backgroundSignal, geoHealth, searchPlaces, type GeoOptions, type GeoPriority, type GeoResult } from './geo';
 import { extractLocationHints, guessCountry, mergePlaceDetails, needsDetails, resolvePlaceDetails } from './location';
 import { fetchPreview, type LinkPreview } from './metadata';
 import { getSettings } from './settings';
@@ -18,6 +18,12 @@ export interface EnrichOptions {
   dates?: boolean;
   /** Fill in a location from the link or text when the save has none. Default true; false once the user picked or cleared one. */
   locate?: boolean;
+  /** Place lookups wait behind the user's own unless someone is waiting on this one ("Refresh preview"). Default 'background'. */
+  priority?: GeoPriority;
+  /** Cancels the preview fetch and place lookups, e.g. when the user leaves. Nothing is written after it fires. */
+  signal?: AbortSignal;
+  /** Resolve only once place details are in. Default true; false resolves after the preview and finishes the place quietly. */
+  waitForPlace?: boolean;
 }
 
 /**
@@ -175,7 +181,7 @@ export function pickResult(results: GeoResult[], expected: string | undefined, s
 }
 
 /** A conservative guess at where a place / event save is. Wrong locations are worse than none. */
-async function autoLocate(item: Item, preview: LinkPreview): Promise<Place | undefined> {
+async function autoLocate(item: Item, preview: LinkPreview, geo: GeoOptions): Promise<Place | undefined> {
   const text = withoutDates([item.title, item.sharedText, item.note, preview.description].filter(Boolean).join('\n'));
   const first = extractLocationHints(text)[0];
   if (!first) return undefined;
@@ -188,7 +194,7 @@ async function autoLocate(item: Item, preview: LinkPreview): Promise<Place | und
   const expected = countryHint(first, text);
   if (!query || !expected) return undefined;
   try {
-    const top = (await searchPlaces(query))[0];
+    const top = (await searchPlaces(query, undefined, geo))[0];
     const fits = top && pickResult([top], expected, true);
     return fits ? placeFromResult(fits) : undefined;
   } catch {
@@ -270,16 +276,18 @@ function gotPreview(p: LinkPreview): boolean {
  * Fills in a saved item from its link preview (title, image, type, tags, event date, where a short
  * link goes) and its location details — only what the user hasn't set. Needs link previews switched
  * on; any network failure just leaves the save as it was. Resolves true when a preview was fetched
- * (false when offline, blocked, switched off or there's no link).
+ * (false when offline, blocked, switched off, cancelled or there's no link).
  */
 export async function enrichItem(id: string, opts: EnrichOptions): Promise<boolean> {
   if (!getSettings().previews) return false;
   const before = await db.items.get(id);
   if (!before) return false;
   const link = safeUrl(before.url);
-  const preview: LinkPreview = link ? await fetchPreview(link) : {};
+  const preview: LinkPreview = link ? await fetchPreview(link, opts.signal) : {};
+  if (opts.signal?.aborted) return false;
   const fetched = gotPreview(preview);
 
+  // Network first, then one short transaction: never hold one open across a fetch.
   const item = await db.transaction('rw', db.items, async (): Promise<Item | undefined> => {
     const current = await db.items.get(id);
     if (!current) return undefined;
@@ -289,17 +297,36 @@ export async function enrichItem(id: string, opts: EnrichOptions): Promise<boole
   });
   if (!item || !getSettings().previews) return fetched;
 
-  let place = item.place;
-  if (!place && opts.locate !== false && (item.type === 'place' || item.type === 'event')) {
-    const found = await autoLocate(item, preview);
-    if (found && (await guardedUpdate(id, (cur) => (cur.place ? undefined : { place: found })))) place = found;
-  }
+  const places = enrichPlace(id, item, preview, opts);
+  if (opts.waitForPlace === false) void places.catch(() => undefined);
+  else await places;
+  return fetched;
+}
 
-  if (place && needsDetails(place) && getSettings().previews) {
-    const at = place;
+/** Finds a location when the save has none and fills in its details, then writes both at once. */
+async function enrichPlace(id: string, item: Item, preview: LinkPreview, opts: EnrichOptions): Promise<void> {
+  const priority = opts.priority ?? 'background';
+  // The geo service keeps timing out: skip quietly. The startup backfill catches up later.
+  if (priority === 'background' && geoHealth().paused) return;
+  const { signal } = opts;
+
+  let place = item.place;
+  const located = !place && opts.locate !== false && (item.type === 'place' || item.type === 'event');
+  if (located) place = await autoLocate(item, preview, { priority, signal });
+  if (!place || signal?.aborted) return;
+
+  const at = place;
+  let full = at;
+  if (needsDetails(at) && getSettings().previews) {
+    // resolvePlaceDetails only passes a signal on, so for background work the signal carries the priority.
+    const geoSignal = priority === 'background' ? backgroundSignal(signal) : signal;
     // For a place save the title already names the venue; a neighbour's name from the lookup would be wrong.
-    const full = await resolvePlaceDetails(at, { name: item.type !== 'place' }).catch(() => at);
-    if (full === at) return fetched;
+    full = await resolvePlaceDetails(at, { name: item.type !== 'place', signal: geoSignal }).catch(() => at);
+  }
+  if (signal?.aborted) return;
+  // A place we found: only if the user hasn't set one meanwhile.
+  if (located) await guardedUpdate(id, (cur) => (cur.place ? undefined : { place: full }));
+  else if (full !== at) {
     await guardedUpdate(id, (cur) => {
       // Only if the location hasn't been changed in the meantime.
       if (!cur.place || cur.place.lat !== at.lat || cur.place.lng !== at.lng) return undefined;
@@ -307,5 +334,4 @@ export async function enrichItem(id: string, opts: EnrichOptions): Promise<boole
       return merged === cur.place ? undefined : { place: merged };
     });
   }
-  return fetched;
 }

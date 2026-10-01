@@ -1,7 +1,8 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowLeft,
   CalendarPlus,
+  ChevronRight,
+  Copy,
   Download,
   FileInput,
   Link2,
@@ -10,23 +11,29 @@ import {
   Share2,
   Smartphone,
   Sparkles,
+  Stethoscope,
   Sun,
   Trash2,
   Upload,
   UserRound,
 } from 'lucide-react';
 import { useId, useMemo, useRef, useState, type FormEvent } from 'react';
+import { DbStatus, useDbHealth } from '../components/DbStatus';
 import { ShareSheet } from '../components/ShareSheet';
 import { useToast } from '../components/Toast';
 import { calendarEventFromItem, downloadIcs, toIcs, type CalendarEvent } from '../lib/calendar';
 import { clearAll, db } from '../lib/db';
+import { formatDiagnostics, STATUS_LABEL, type DiagnosticsEnv } from '../lib/dbHealth';
+import { clearDrafts } from '../lib/drafts';
 import { plural } from '../lib/format';
-import { promptInstall, useInstall } from '../lib/install';
+import { isEmbeddedBrowser, isStandalone, promptInstall, useInstall } from '../lib/install';
+import { useLiveQuery } from '../lib/live';
 import { setPendingImport } from '../lib/pendingImport';
 import { goBack, navigate } from '../lib/router';
 import { addSampleData } from '../lib/samples';
 import { setSettings, useSettings, type Settings } from '../lib/settings';
 import { parseShareInput } from '../lib/share';
+import { copyText } from '../lib/shareSheet';
 import { exportBackup, importBackup } from '../lib/transfer';
 
 export function SettingsScreen() {
@@ -65,6 +72,8 @@ export function SettingsScreen() {
   const wipe = async () => {
     if (!confirm('Delete every save and collection on this device? This cannot be undone. Consider downloading a backup first.')) return;
     await clearAll();
+    // Unsaved drafts too (text from failed saves, kept for a retry).
+    clearDrafts();
     toast('Everything deleted');
   };
 
@@ -106,6 +115,8 @@ export function SettingsScreen() {
         </button>
         <h1 className="page-title small">Settings</h1>
       </header>
+
+      <DbStatus />
 
       {!install.standalone && (
         <>
@@ -322,10 +333,99 @@ export function SettingsScreen() {
       <p className="hint">
         Magpie v{__APP_VERSION__} — works offline, no account needed. Map data © OpenStreetMap contributors.
       </p>
+      <Diagnostics />
 
       {items && items.length > 0 && (
         <ShareSheet open={sharing} onClose={() => setSharing(false)} target={{ kind: 'library', items, collections: collections ?? [] }} />
       )}
     </div>
+  );
+}
+
+const size = (bytes: number) =>
+  bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)} GB` : `${(bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0)} MB`;
+
+/** What we need to look into a "Magpie is stuck" report: storage health, how Magpie is running, the browser. */
+function Diagnostics() {
+  const toast = useToast();
+  const health = useDbHealth();
+  const [storage, setStorage] = useState<Pick<DiagnosticsEnv, 'persisted' | 'usage'>>({});
+  const [env] = useState(() => ({ standalone: isStandalone(), embedded: isEmbeddedBrowser(), userAgent: navigator.userAgent }));
+
+  const loadStorage = async () => {
+    try {
+      const [persisted, estimate] = await Promise.all([navigator.storage?.persisted?.(), navigator.storage?.estimate?.()]);
+      const usage = estimate?.usage === undefined ? undefined : `${size(estimate.usage)}${estimate.quota ? ` of ${size(estimate.quota)}` : ''}`;
+      setStorage({ persisted, usage });
+    } catch {
+      // Not available here.
+    }
+  };
+
+  const copy = async () => {
+    const text = formatDiagnostics(health, { version: __APP_VERSION__, online: navigator.onLine, ...env, ...storage });
+    toast((await copyText(text)) ? 'Diagnostics copied — paste them in your message to us' : "Couldn't copy — try again");
+  };
+
+  return (
+    <details
+      className="diagnostics"
+      onToggle={(e) => {
+        if (e.currentTarget.open) void loadStorage();
+      }}
+    >
+      <summary>
+        <Stethoscope size={20} aria-hidden />
+        <div className="grow">
+          <div>Diagnostics</div>
+          <div className="s">Storage: {STATUS_LABEL[health.status].toLowerCase()}</div>
+        </div>
+        <ChevronRight size={18} aria-hidden className="diagnostics-chevron" />
+      </summary>
+      <div className="diagnostics-body">
+        <dl className="diagnostics-list">
+          <dt>Storage</dt>
+          <dd>{STATUS_LABEL[health.status]}</dd>
+          <dt>Last open</dt>
+          <dd>{health.openMs === undefined ? '—' : `${health.openMs} ms${health.opens > 1 ? ` (opened ${health.opens} times)` : ''}`}</dd>
+          {health.lastError && (
+            <>
+              <dt>Last error</dt>
+              <dd>{health.lastError}</dd>
+            </>
+          )}
+          <dt>Running as</dt>
+          <dd>{env.standalone ? 'Installed app' : 'Browser tab'}</dd>
+          <dt>Built-in browser</dt>
+          <dd>{env.embedded ? "Yes — inside another app's browser" : 'No'}</dd>
+          {storage.persisted !== undefined && (
+            <>
+              <dt>Kept safe</dt>
+              <dd>{storage.persisted ? 'Yes — the browser won’t clear it to free space' : 'No — the browser may clear it when space runs low'}</dd>
+            </>
+          )}
+          {storage.usage && (
+            <>
+              <dt>Space used</dt>
+              <dd>{storage.usage}</dd>
+            </>
+          )}
+          <dt>Browser</dt>
+          <dd>{env.userAgent}</dd>
+        </dl>
+        <span className="label">Recent storage events</span>
+        <pre className="diagnostics-events">
+          {health.events.length
+            ? health.events
+                .slice(-8)
+                .map((e) => `${new Date(e.at).toLocaleTimeString()} ${e.kind}${e.detail ? ` — ${e.detail}` : ''}`)
+                .join('\n')
+            : 'None yet'}
+        </pre>
+        <button type="button" className="btn small outline" onClick={copy}>
+          <Copy size={14} aria-hidden /> Copy diagnostics
+        </button>
+      </div>
+    </details>
   );
 }

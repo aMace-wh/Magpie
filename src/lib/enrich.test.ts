@@ -2,11 +2,17 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./metadata', () => ({ fetchPreview: vi.fn() }));
-vi.mock('./geo', () => ({ searchPlaces: vi.fn(), reverseGeocode: vi.fn() }));
+const geoState = vi.hoisted(() => ({ paused: false }));
+vi.mock('./geo', () => ({
+  searchPlaces: vi.fn(),
+  reverseGeocode: vi.fn(),
+  geoHealth: () => ({ paused: geoState.paused, troubles: 0, userBusy: false }),
+  backgroundSignal: vi.fn((parent?: AbortSignal) => parent ?? new AbortController().signal),
+}));
 
 import { addItem, db, saveShared, type NewItem } from './db';
 import { enrichItem, isShortLink, locationHints, looksLikeVenue, REFRESH_OPTIONS, resolvedShortLink, type EnrichOptions } from './enrich';
-import { reverseGeocode, searchPlaces, type GeoResult } from './geo';
+import { backgroundSignal, reverseGeocode, searchPlaces, type GeoResult } from './geo';
 import { fetchPreview, type LinkPreview } from './metadata';
 import { setSettings } from './settings';
 import type { Item } from './types';
@@ -36,6 +42,7 @@ const lisbonResult: GeoResult = { lat: 38.7189, lng: -9.1446, name: 'Hot Clube d
 beforeEach(async () => {
   await db.items.clear();
   vi.clearAllMocks();
+  geoState.paused = false;
   setSettings({ previews: true });
   preview.mockResolvedValue({});
   search.mockResolvedValue([]);
@@ -383,5 +390,77 @@ describe('Instagram share links', () => {
     expect(resolvedShortLink(share, 'https://www.instagram.com/accounts/login/?next=https%3A%2F%2Fevil.example%2Fp%2Fx')).toBeUndefined();
     expect(resolvedShortLink(share, 'https://www.instagram.com/accounts/login/?next=%2F%2Fevil.example%2F')).toBeUndefined();
     expect(resolvedShortLink(share, 'https://www.instagram.com/accounts/login/')).toBeUndefined();
+  });
+});
+
+describe('enrichItem: geo priority and back-off', () => {
+  it('does its place lookups as background work', async () => {
+    const item = await save({ type: 'event', sharedText: '📍 Hot Clube de Portugal, Lisbon' });
+    search.mockResolvedValue([{ ...lisbonResult, city: undefined }]);
+    await enrichItem(item.id, GUESSED);
+    expect(search.mock.calls[0][2]).toMatchObject({ priority: 'background' });
+    // resolvePlaceDetails only passes a signal on: a background one.
+    expect(backgroundSignal).toHaveBeenCalled();
+    expect(reverse.mock.calls[0][2]?.signal).toBe(vi.mocked(backgroundSignal).mock.results[0].value);
+  });
+
+  it('writes a found place and its details in one go', async () => {
+    const item = await save({ type: 'event', sharedText: '📍 Hot Clube de Portugal, Lisbon' });
+    search.mockResolvedValue([{ lat: 38.7189, lng: -9.1446, name: 'Hot Clube de Portugal', countryCode: 'PT' }]);
+    reverse.mockResolvedValue({ city: 'Lisbon', country: 'Portugal', countryCode: 'PT' });
+    const update = vi.spyOn(db.items, 'update');
+    await enrichItem(item.id, GUESSED);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect((await get(item.id)).place).toEqual({ lat: 38.7189, lng: -9.1446, name: 'Hot Clube de Portugal', city: 'Lisbon', country: 'Portugal', countryCode: 'PT' });
+    update.mockRestore();
+  });
+
+  it('skips place work quietly while background lookups are paused', async () => {
+    geoState.paused = true;
+    const pinned = await save({ type: 'place', place: { lat: 38.7, lng: -9.14 } });
+    const marked = await save({ type: 'event', sharedText: '📍 Lisbon' });
+    preview.mockResolvedValue({ title: 'Page', image: 'https://img.example/a.jpg' });
+    expect(await enrichItem(pinned.id, GUESSED)).toBe(true);
+    await enrichItem(marked.id, GUESSED);
+    expect(search).not.toHaveBeenCalled();
+    expect(reverse).not.toHaveBeenCalled();
+    // The preview itself still lands.
+    expect((await get(pinned.id)).image).toBe('https://img.example/a.jpg');
+  });
+
+  it("uses the user's priority and signal when someone is waiting (Refresh preview)", async () => {
+    const ctrl = new AbortController();
+    const item = await save({ type: 'place', place: { lat: 38.7, lng: -9.14 } });
+    reverse.mockResolvedValue({ city: 'Lisbon', country: 'Portugal', countryCode: 'PT' });
+    geoState.paused = true; // never holds up a user lookup
+    await enrichItem(item.id, { ...REFRESH_OPTIONS, priority: 'user', signal: ctrl.signal });
+    expect(backgroundSignal).not.toHaveBeenCalled();
+    expect(reverse.mock.calls[0][2]?.signal).toBe(ctrl.signal);
+    expect((await get(item.id)).place?.countryCode).toBe('PT');
+  });
+
+  it('can resolve after the preview and finish the place quietly', async () => {
+    const item = await save({ type: 'place', place: { lat: 38.7, lng: -9.14 } });
+    preview.mockResolvedValue({ title: 'Page' });
+    let answer!: (p: { city: string; country: string; countryCode: string }) => void;
+    reverse.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    expect(await enrichItem(item.id, { ...REFRESH_OPTIONS, waitForPlace: false })).toBe(true);
+    await vi.waitFor(() => expect(reverse).toHaveBeenCalled());
+    expect((await get(item.id)).place?.countryCode).toBeUndefined();
+    answer({ city: 'Lisbon', country: 'Portugal', countryCode: 'PT' });
+    await vi.waitFor(async () => expect((await get(item.id)).place?.countryCode).toBe('PT'));
+  });
+
+  it('writes nothing once cancelled', async () => {
+    const ctrl = new AbortController();
+    const item = await save({ type: 'place', place: { lat: 38.7, lng: -9.14 } });
+    preview.mockImplementation(async () => {
+      ctrl.abort(); // the user left while the preview loaded
+      return { title: 'Page', image: 'https://img.example/a.jpg' };
+    });
+    expect(await enrichItem(item.id, { ...REFRESH_OPTIONS, priority: 'user', signal: ctrl.signal })).toBe(false);
+    expect(preview.mock.calls[0][1]).toBe(ctrl.signal);
+    expect(reverse).not.toHaveBeenCalled();
+    expect(await get(item.id)).toEqual(item);
   });
 });

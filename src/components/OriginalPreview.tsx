@@ -387,7 +387,9 @@ interface SnippetProps {
 
 /** A line or two of the original shared text for cards, or nothing when it would only repeat the title. */
 export function OriginalSnippet({ item, lines = 2, className }: SnippetProps) {
-  const text = useMemo(() => snippetText(originalTextOf(item), item.title), [item]);
+  // Keyed on the save's version rather than the object: live queries hand out a fresh copy on every write.
+  const version = item.updatedAt > 0 ? `${item.id}:${item.updatedAt}` : item;
+  const text = useMemo(() => snippetText(originalTextOf(item), item.title), [version]);
   if (!text) return null;
   return (
     <span className={`orig-snippet${className ? ` ${className}` : ''}`} dir="auto" style={{ WebkitLineClamp: Math.max(1, lines) }}>

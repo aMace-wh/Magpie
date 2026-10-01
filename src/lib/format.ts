@@ -1,8 +1,13 @@
-const rtf = typeof Intl !== 'undefined' ? new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }) : undefined;
+let formatter: Intl.RelativeTimeFormat | null | undefined;
+
+/** Made on first use: setting one up takes a moment, and nothing needs it while Magpie starts. */
+const relative = () =>
+  (formatter ??= typeof Intl !== 'undefined' && Intl.RelativeTimeFormat ? new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }) : null);
 
 export function timeAgo(ts: number, now = Date.now()): string {
   const s = Math.round((ts - now) / 1000);
   const abs = Math.abs(s);
+  const rtf = relative();
   if (!rtf) return new Date(ts).toLocaleDateString();
   if (abs < 60) return 'just now';
   if (abs < 3600) return rtf.format(Math.round(s / 60), 'minute');

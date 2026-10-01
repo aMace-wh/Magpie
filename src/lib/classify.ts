@@ -377,7 +377,10 @@ const w = (words: string, weight: number, tag?: string): Signal => ({
   tag,
 });
 
-const SIGNALS: Partial<Record<ItemType, Signal[]>> = {
+// Built on first use, not at load: making these Unicode regexes takes a while on a phone, and nothing needs them
+// before the first analysis (or the warm-up).
+let signals: Partial<Record<ItemType, Signal[]>> | undefined;
+const keywordSignals = (): Partial<Record<ItemType, Signal[]>> => (signals ??= {
   recipe: [
     w('recipes?|recipe ideas?', 3),
     w('ingredients?|tbsp|tsp|tablespoons?|teaspoons?|preheat|simmer|marinade|how to make', 3),
@@ -453,7 +456,7 @@ const SIGNALS: Partial<Record<ItemType, Signal[]>> = {
     w('raves?|ravetok|(?:walking|food|guided|boat|bus) tours?|now showing|last chance to see|final (?:week|weekend|days)|runs until|on until|matchday|match day|kick[- ]?off', 2),
     w('events?|whats on|what.s on|happening|party|parties', 1),
   ],
-};
+});
 
 /** Ways to book or turn up. On a video they mean "go to this", not just "watch this". */
 const BOOKING_RE = w(
@@ -520,7 +523,7 @@ function scoreText(text: string): Map<ItemType, Evidence> {
   const out = new Map<ItemType, Evidence>();
   for (const type of KEYWORD_ORDER) {
     const e: Evidence = { score: 0, terms: [], tags: [] };
-    for (const s of SIGNALS[type] ?? []) {
+    for (const s of keywordSignals()[type] ?? []) {
       const m = s.re.exec(text);
       if (!m) continue;
       e.score += s.weight;
@@ -1334,4 +1337,34 @@ function safePath(url: string): string {
   } catch {
     return '';
   }
+}
+
+/**
+ * The keyword and title regexes, keyword signals first, so warmup.ts can compile them ahead of time (a regex
+ * compiles on its first runs, which takes a while for the big Unicode ones on a phone).
+ */
+export function warmRegExps(): RegExp[] {
+  return [
+    ...Object.values(keywordSignals()).flatMap((list) => (list ?? []).map((s) => s.re)),
+    BOOKING_RE,
+    RECAP_RE,
+    ...STRONG_HINTS,
+    ...WEAK_HINTS,
+    RECURRING_BEFORE,
+    URL_RE,
+    URL_RE_ALL,
+    IGNORED_HASHTAG_RE,
+    INVISIBLE_RE,
+    SITE_SUFFIX_RE,
+    ON_SITE_RE,
+    SITE_ONLY_RE,
+    EVENT_SITE_SUFFIX_RE,
+    TICKETS_BEFORE_DATE_RE,
+    JUNK_TITLE_RE,
+    CHECK_OUT_NAMED,
+    CHECK_OUT_BY,
+    SHARE_FOOTER_RE,
+    LOCALE_SEGMENT_RE,
+    ...DOMAIN_RULES.flatMap((r) => (r.path ? [r.path] : [])),
+  ];
 }

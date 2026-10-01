@@ -124,10 +124,11 @@ export function ShareSheet({ open, onClose, target }: Props) {
   const count = item ? 1 : (items?.length ?? 0);
   const library = target.kind === 'library';
   // Text notes: in a library share only with "Include my notes"; in a collection you picked, always (and it says so).
-  const notes = useMemo(() => (items ?? []).filter(isTextNote).length, [items]);
+  // Neither is worked out while the sheet is closed (the library changes underneath it).
+  const notes = useMemo(() => (open ? (items ?? []).filter(isTextNote).length : 0), [open, items]);
   const personalAvailable = useMemo(
-    () => (item ? hasPersonal(item) : (items ?? []).some(hasPersonal) || (library && notes > 0)),
-    [item, items, library, notes],
+    () => open && (item ? hasPersonal(item) : (items ?? []).some(hasPersonal) || (library && notes > 0)),
+    [open, item, items, library, notes],
   );
   const sending = payload?.items.length ?? count;
   const capped = library && count - (personal ? 0 : notes) > MAX_SHARE_ITEMS;
@@ -176,6 +177,15 @@ export function ShareSheet({ open, onClose, target }: Props) {
 
   const targets = SOCIAL_TARGETS.filter((t) => !t.mobileOnly || mobile);
   const sheetTitle = target.kind === 'item' ? 'Share this save' : target.kind === 'collection' ? 'Share collection' : 'Share your library';
+
+  // Closed: keep the (closed) dialog, skip building what's in it.
+  if (!open) {
+    return (
+      <Sheet open={false} title={sheetTitle} onClose={onClose}>
+        {null}
+      </Sheet>
+    );
+  }
 
   const summary = (() => {
     if (item) {

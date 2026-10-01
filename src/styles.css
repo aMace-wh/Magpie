@@ -693,6 +693,13 @@ img {
   transform: scale(0.98);
 }
 
+/* Off-screen cards skip layout and paint (a big library otherwise lays out every card at start and on each
+   change). 260px stands in for a card until it has been drawn once; after that its real height is kept. */
+.grid > .card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 260px;
+}
+
 .card-body {
   display: flex;
   flex-direction: column;
@@ -1253,6 +1260,13 @@ dialog.sheet::backdrop {
   border-bottom: 0;
 }
 
+/* Long lists (picking saves, importing a library, places by country) skip off-screen rows the same way. On the
+   row rather than its <li>, so the focus ring isn't clipped. */
+.list-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 65px;
+}
+
 .list-row .thumb-sm {
   flex: 0 0 auto;
   width: 44px;
@@ -1794,6 +1808,11 @@ dialog.sheet::backdrop {
   border: 1px solid var(--border);
   text-align: left;
   width: 100%;
+}
+
+.timeline > .entry {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 98px;
 }
 
 .entry .thumb-sm {

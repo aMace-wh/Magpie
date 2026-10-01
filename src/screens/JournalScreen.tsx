@@ -1,9 +1,10 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { useMemo } from 'react';
+import { DbStatus, Loading } from '../components/DbStatus';
 import { Stars } from '../components/Stars';
 import { ThumbSmall } from '../components/Thumb';
 import { db } from '../lib/db';
 import { dayLabel, monthLabel, plural } from '../lib/format';
+import { useLiveQuery } from '../lib/live';
 import { countryName, flagEmoji, placeCountryCode } from '../lib/location';
 import { navigate } from '../lib/router';
 import { TYPE_INFO, type Item } from '../lib/types';
@@ -52,7 +53,10 @@ export function JournalScreen() {
         <h1 className="page-title">Journal</h1>
       </header>
 
-      {done?.length === 0 ? (
+      <DbStatus />
+      {done === undefined ? (
+        <Loading label="Loading your journal…" />
+      ) : done.length === 0 ? (
         <div className="empty">
           <div className="emoji">📔</div>
           <h2>Your journal starts here</h2>

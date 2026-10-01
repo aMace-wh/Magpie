@@ -1,6 +1,7 @@
 import { CalendarDays } from 'lucide-react';
+import { useClock } from '../lib/clock';
 import type { When } from '../lib/types';
-import { daysUntil, formatWhen, isAllDay, normalizeWhen, relativeWhen, whenStatus } from '../lib/when';
+import { whenBadge } from '../lib/when';
 import './When.css';
 
 interface Props {
@@ -9,30 +10,25 @@ interface Props {
   variant?: 'card' | 'inline';
 }
 
-/** Compact date pill for cards and lists: green while it's on, highlighted when it's within a week, faint once over. */
+/**
+ * Compact date pill for cards and lists: green while it's on, highlighted when it's within a week, faint once over.
+ * Keeps up with the time ("Tomorrow" becomes "Today") even on a card that isn't otherwise redrawn.
+ */
 export function WhenBadge({ when, now, variant = 'card' }: Props) {
-  const w = normalizeWhen(when);
-  if (!w) return null;
-  const at = now ?? new Date();
-  const status = whenStatus(w, at);
-  const label = formatWhen(w, at);
-  const tone = status === 'ongoing' ? 'on' : status === 'past' ? 'past' : daysUntil(w, at) <= 7 ? 'soon' : 'later';
-
-  let text = label;
-  if (status === 'ongoing') {
-    const multiDay = isAllDay(w.start) && !!w.end && w.end.slice(0, 10) !== w.start;
-    // Ranges say when they end ("On now · until 5 Jan"); a timed event is simply on now; an all-day date is today.
-    if (multiDay) text = `On now · ${label.charAt(0).toLowerCase()}${label.slice(1)}`;
-    else text = isAllDay(w.start) ? 'Today' : 'On now';
-  }
-  const relative = relativeWhen(w, at);
+  // As one string, so a clock tick only redraws the pill when what it shows changes.
+  const view = useClock((t) => {
+    const v = whenBadge(when, now ?? new Date(t));
+    return v ? [v.tone, v.text, v.title, v.spoken].join('\n') : '';
+  });
+  if (!view) return null;
+  const [tone, text, title, spoken] = view.split('\n');
 
   return (
     // "when-badge--card", not "card": that's the save card's own class.
-    <span className={`when-badge when-badge--${variant} is-${tone}`} title={relative ? `${label} (${relative})` : label}>
+    <span className={`when-badge when-badge--${variant} is-${tone}`} title={title}>
       <CalendarDays size={variant === 'card' ? 12 : 14} aria-hidden />
       <span className="when-badge-text">{text}</span>
-      {relative && status !== 'ongoing' && <span className="sr-only">, {relative}</span>}
+      {spoken && <span className="sr-only">, {spoken}</span>}
     </span>
   );
 }

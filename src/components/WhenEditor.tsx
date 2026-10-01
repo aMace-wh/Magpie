@@ -1,5 +1,5 @@
 import { Check, Clock, Sparkles, Trash2 } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { memo, useEffect, useId, useState } from 'react';
 import type { When } from '../lib/types';
 import {
   addDaysIso,
@@ -30,7 +30,7 @@ const sameFields = (a: WhenFields, b: WhenFields) =>
   a.startDate === b.startDate && a.endDate === b.endDate && a.timed === b.timed && a.startTime === b.startTime && a.endTime === b.endTime;
 
 /** Sheet for setting, changing or clearing when an event or activity happens. */
-export function WhenEditor({ open, value, suggestion, onSave, onClose }: Props) {
+export const WhenEditor = memo(function WhenEditor({ open, value, suggestion, onSave, onClose }: Props) {
   const id = useId();
   const [draft, setDraft] = useState<WhenFields>(() => whenToFields(value));
 
@@ -234,4 +234,4 @@ export function WhenEditor({ open, value, suggestion, onSave, onClose }: Props) 
       </div>
     </Sheet>
   );
-}
+});

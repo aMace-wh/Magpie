@@ -1,6 +1,6 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { Gift, Plus, Search, Settings, Share2, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { DbStatus, Loading } from '../components/DbStatus';
 import { Filters } from '../components/Filters';
 import { InstallBanner } from '../components/InstallBanner';
 import { StorageWarning } from '../components/StorageWarning';
@@ -11,9 +11,11 @@ import { SurpriseSheet } from '../components/SurpriseSheet';
 import { ThumbSmall } from '../components/Thumb';
 import { useToast } from '../components/Toast';
 import { WhenBadge } from '../components/WhenBadge';
+import { clockNow, useClock } from '../lib/clock';
 import { db } from '../lib/db';
 import { filterItems, isFiltering, type ItemFilter } from '../lib/filter';
 import { useInstall } from '../lib/install';
+import { useLiveQuery } from '../lib/live';
 import { navigate } from '../lib/router';
 import { addSampleData } from '../lib/samples';
 import type { Item } from '../lib/types';
@@ -37,7 +39,9 @@ export function HomeScreen({ onAdd }: { onAdd: () => void }) {
   const [sharing, setSharing] = useState(false);
   const shown = useMemo(() => filterItems(items ?? [], filter), [items, filter]);
   const scoped = useMemo(() => filterItems(items ?? [], { ...filter, type: 'all', status: 'any' }), [items, filter]);
-  const upcoming = useMemo(() => comingUp(items ?? []), [items]);
+  // Coming up is worked out again each hour too, not only when the library changes.
+  const hour = useClock((now) => Math.floor(now / 3600000));
+  const upcoming = useMemo(() => comingUp(items ?? [], new Date(Math.max(clockNow(), hour * 3600000))), [items, hour]);
   const showUpcoming = upcoming.length > 0 && !isFiltering(filter) && filter.status !== 'done';
   const hasItems = !!items?.length;
 
@@ -58,10 +62,13 @@ export function HomeScreen({ onAdd }: { onAdd: () => void }) {
         </button>
       </header>
 
+      <DbStatus />
       <StorageWarning />
       <InstallBanner />
 
-      {items === undefined ? null : items.length === 0 ? (
+      {items === undefined ? (
+        <Loading cards={4} />
+      ) : items.length === 0 ? (
         <Welcome onAdd={onAdd} />
       ) : (
         <>

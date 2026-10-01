@@ -424,6 +424,35 @@ export function relativeWhen(w: When, now: Date = new Date()): string {
   return years <= 1 ? 'in a year' : `in ${years} years`;
 }
 
+export interface WhenBadgeView {
+  /** on: happening now; soon: within a week; later; past. */
+  tone: 'on' | 'soon' | 'later' | 'past';
+  text: string;
+  /** Tooltip: the full label, plus how far away it is. */
+  title: string;
+  /** Read out after the text ("tomorrow"); empty when the text already says it. */
+  spoken: string;
+}
+
+/** What a date pill shows at `now`: "On now", "Today", "Tomorrow · 7 pm", "On now · until 5 Jan"… Undefined for an invalid When. */
+export function whenBadge(when: When, now: Date = new Date()): WhenBadgeView | undefined {
+  const w = normalizeWhen(when);
+  if (!w) return undefined;
+  const status = whenStatus(w, now);
+  const label = formatWhen(w, now);
+  const tone = status === 'ongoing' ? 'on' : status === 'past' ? 'past' : daysUntil(w, now) <= 7 ? 'soon' : 'later';
+
+  let text = label;
+  if (status === 'ongoing') {
+    const multiDay = isAllDay(w.start) && !!w.end && w.end.slice(0, 10) !== w.start;
+    // Ranges say when they end ("On now · until 5 Jan"); a timed event is simply on now; an all-day date is today.
+    if (multiDay) text = `On now · ${label.charAt(0).toLowerCase()}${label.slice(1)}`;
+    else text = isAllDay(w.start) ? 'Today' : 'On now';
+  }
+  const relative = relativeWhen(w, now);
+  return { tone, text, title: relative ? `${label} (${relative})` : label, spoken: relative && status !== 'ongoing' ? relative : '' };
+}
+
 // ---------------------------------------------------------------------------
 // Extraction
 
@@ -486,6 +515,19 @@ const TIME_GAP_AFTER =
 const TIME_GAP_BEFORE = /^[^\p{L}\p{N}]*(?:on|this)?[^\p{L}\p{N}]*$/iu;
 
 const MAX_TEXT = 20_000;
+
+/**
+ * The date and time regexes, so warmup.ts can compile them ahead of time (a regex compiles on its first runs,
+ * which takes a while for the big Unicode ones on a phone).
+ */
+export function warmRegExps(): RegExp[] {
+  return [
+    DM_RE, MD_RE, ISO_TEXT_RE, NUM_RE, WD_NUM_RE, MONTH_YEAR_RE, RELATIVE_RE, WEEKDAY_RE, TIME_RE, TIME_STICKY,
+    RANGE_GAP, PREFIX_DAY_RE, SUFFIX_DAY_RE, UNTIL_PREFIX, FROM_PREFIX, RANGE_FROM_PREFIX, POSTED_PREFIX, CLOSED_PREFIX,
+    WD_LIST_AFTER, WD_LIST_BEFORE, BARE_AT_RE, TIMED_GAP_RE, TIME_AFTER_RE, TIME_RANGE_SEP, TIME_OPEN_END, BARE_START_RE,
+    TIME_KEYWORD_BEFORE, TIME_GAP_AFTER, TIME_GAP_BEFORE, WHEN_RE,
+  ];
+}
 
 interface Span {
   index: number;

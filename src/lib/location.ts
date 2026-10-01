@@ -372,7 +372,42 @@ interface Gazetteer {
   re: RegExp;
 }
 
-let gazetteer: Gazetteer | undefined;
+/**
+ * A table built in small steps: all at once when something first needs it, or a step at a time from the
+ * idle-time warm-up (warmup.ts). Either way it ends up the same.
+ */
+interface Stepped<T> {
+  get(): T;
+  /** Does one step; true once it's built. */
+  step(): boolean;
+  /** The table if it's built, without building it. */
+  peek(): T | undefined;
+}
+
+function stepped<T>(start: () => Iterator<void, T>): Stepped<T> {
+  let value: T | undefined;
+  let steps: Iterator<void, T> | undefined;
+  const step = () => {
+    if (value !== undefined) return true;
+    steps ??= start();
+    const r = steps.next();
+    if (!r.done) return false;
+    value = r.value;
+    steps = undefined;
+    return true;
+  };
+  return {
+    get: () => {
+      while (!step());
+      return value!;
+    },
+    step,
+    peek: () => value,
+  };
+}
+
+// Names added per step when the gazetteer is built in idle time.
+const NAMES_PER_STEP = 32;
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -386,7 +421,8 @@ function namePattern(n: string): string {
     .join('\\s+');
 }
 
-function buildGazetteer(): Gazetteer {
+/** Builds the gazetteer, pausing every few dozen names (see stepped). */
+function* buildGazetteer(): Generator<void, Gazetteer> {
   const byKey = new Map<string, Entry>();
   const patterns = new Map<string, string>();
 
@@ -408,15 +444,26 @@ function buildGazetteer(): Gazetteer {
     byKey.set(k, { code, label: label ?? name, kind, caps, context: CONTEXT_BLOCK[k] });
     patterns.set(k, namePattern(n));
   };
-  const addAll = (table: Record<string, string>, kind: Kind, caps?: Caps) => {
-    for (const [code, list] of Object.entries(table)) for (const name of list.split('|')) add(name, code, kind, caps);
-  };
+  let added = 0;
+  const pause = () => ++added % NAMES_PER_STEP === 0;
+  function* addAll(table: Record<string, string>, kind: Kind, caps?: Caps): Generator<void> {
+    for (const [code, list] of Object.entries(table)) {
+      for (const name of list.split('|')) {
+        add(name, code, kind, caps);
+        if (pause()) yield;
+      }
+    }
+  }
 
-  for (const phrase of BLOCKED.split('|')) add(phrase, '', 'block');
-  addAll(ALIASES, 'country');
-  addAll(CITIES, 'city');
-  addAll(REGIONS, 'region');
+  for (const phrase of BLOCKED.split('|')) {
+    add(phrase, '', 'block');
+    if (pause()) yield;
+  }
+  yield* addAll(ALIASES, 'country');
+  yield* addAll(CITIES, 'city');
+  yield* addAll(REGIONS, 'region');
   const en = regionNamer('en');
+  yield;
   if (en) {
     for (const code of ISO_CODES) {
       let name: string | undefined;
@@ -428,9 +475,11 @@ function buildGazetteer(): Gazetteer {
       if (!name || name === code) continue;
       // "Myanmar (Burma)" → "Myanmar"; "Hong Kong SAR China" stays and is also aliased.
       add(name.replace(/\s*\([^)]*\)/g, ''), code, 'country', PROPER_NAMES.has(keyOf(name)) ? 'proper' : undefined);
+      if (pause()) yield;
     }
   }
-  addAll(DEMONYMS, 'demonym', 'title');
+  yield* addAll(DEMONYMS, 'demonym', 'title');
+  yield;
 
   // Longest first, so "New South Wales" wins over "Wales" at the same position.
   const sources = [...patterns.entries()].sort((a, b) => b[0].length - a[0].length).map(([, p]) => p);
@@ -444,9 +493,10 @@ const PROPER_NAMES = new Set([
   'curacao', 'togo', 'dominica', 'christmas island', 'norfolk island',
 ]);
 
+const gazetteer = stepped(buildGazetteer);
+
 function getGazetteer(): Gazetteer {
-  gazetteer ??= buildGazetteer();
-  return gazetteer;
+  return gazetteer.get();
 }
 
 interface Hit {
@@ -540,25 +590,39 @@ function exactPlace(s: string): Entry | undefined {
   return e && (e.kind === 'country' || e.kind === 'city' || e.kind === 'region') ? e : undefined;
 }
 
-const localNameMaps = new Map<string, Map<string, string>>();
-
-function localCountryNames(locale: string): Map<string, string> {
-  let map = localNameMaps.get(locale);
-  if (map) return map;
-  map = new Map();
+/** Country names in a language → code ("Deutschland" → DE), pausing every few dozen names (see stepped). */
+function* buildCountryNames(locale: string): Generator<void, Map<string, string>> {
+  const map = new Map<string, string>();
   const namer = regionNamer(locale);
+  yield;
   if (namer) {
-    for (const code of ISO_CODES) {
+    for (let i = 0; i < ISO_CODES.length; i++) {
+      const code = ISO_CODES[i];
       try {
         const name = namer.of(code);
         if (name && name !== code) map.set(keyOf(name.replace(/\s*\([^)]*\)/g, '')), code);
       } catch {
         /* skip */
       }
+      if ((i + 1) % NAMES_PER_STEP === 0) yield;
     }
   }
-  localNameMaps.set(locale, map);
   return map;
+}
+
+const localNameMaps = new Map<string, Stepped<Map<string, string>>>();
+
+function countryNamesIn(locale: string): Stepped<Map<string, string>> {
+  let names = localNameMaps.get(locale);
+  if (!names) {
+    names = stepped(() => buildCountryNames(locale));
+    localNameMaps.set(locale, names);
+  }
+  return names;
+}
+
+function localCountryNames(locale: string): Map<string, string> {
+  return countryNamesIn(locale).get();
 }
 
 /** ISO code for a country name ("Portugal", "UK", "Deutschland" in a German locale), or undefined. */
@@ -1321,4 +1385,33 @@ export function groupSummary(items: Item[]): string {
   if (todo.length) parts.push(`${todo.length} ${word(todo, 'todo', 'to do')}`);
   if (done.length) parts.push(`${done.length} ${word(done, 'done', 'done')}`);
   return parts.join(' · ');
+}
+
+// ---------------------------------------------------------------------------
+// Idle-time warm-up (see warmup.ts)
+
+/**
+ * Builds the gazetteer and the device-language country names a small step at a time. True once both are built.
+ * The tables come out exactly as when a lookup builds them on the spot.
+ */
+export function warmTablesStep(): boolean {
+  return gazetteer.step() && countryNamesIn(defaultLocale()).step();
+}
+
+/**
+ * This module's regexes, the gazetteer's too once it's built, so they can be compiled ahead of time (a regex
+ * compiles on its first runs, which takes a while for the big Unicode ones on a phone).
+ */
+export function warmRegExps(): RegExp[] {
+  const built = gazetteer.peek();
+  return [
+    ...(built ? [built.re] : []),
+    ...Object.values(CONTEXT_BLOCK),
+    WORD_BEFORE,
+    WORD_AFTER,
+    ABBREVIATION,
+    TOKEN,
+    PLACEHOLDER,
+    STREET_RE,
+  ];
 }

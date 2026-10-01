@@ -2,7 +2,7 @@ import { LocateFixed, MapPin, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseLatLng, parsePlaceFromUrl } from '../lib/classify';
 import { db, updateItem } from '../lib/db';
-import { currentPosition, searchPlaces, type GeoResult } from '../lib/geo';
+import { currentPosition, holdBackgroundLookups, searchPlaces, type GeoResult } from '../lib/geo';
 import { extractLocationHints, flagEmoji, mergePlaceDetails, needsDetails, placeLabel, resolvePlaceDetails } from '../lib/location';
 import type { Item, Place } from '../lib/types';
 import { MiniMap } from './LazyMiniMap';
@@ -22,6 +22,20 @@ function toPlace(r: GeoResult): Place {
 
 const coordsText = (p: Place) => `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`;
 
+/** True once `active` has lasted `ms` — time to say "Still searching…". */
+function useSlow(active: boolean, ms = 4000): boolean {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (!active) return;
+    const timer = setTimeout(() => setSlow(true), ms);
+    return () => clearTimeout(timer);
+  }, [active, ms]);
+  return active && slow;
+}
+
+const isAbort = (e: unknown) => (e as Error | undefined)?.name === 'AbortError';
+
 /** Fills in city / country after saving, if the lookup didn't finish before the sheet closed. */
 async function backfillDetails(id: string, place: Place): Promise<void> {
   const full = await resolvePlaceDetails(place);
@@ -36,12 +50,19 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
   const toast = useToast();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<GeoResult[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const busy = searching || locating;
   const [picked, setPicked] = useState<Place | undefined>(item.place);
   const [resolving, setResolving] = useState(false);
+  const slowSearch = useSlow(searching);
+  const slowResolve = useSlow(resolving);
   // Bumped on every new pick, so a slow lookup never overwrites a newer choice.
   const pickSeq = useRef(0);
   const wasOpen = useRef(false);
+  // The search and address lookup in progress, cancelled by a newer one or by closing the sheet.
+  const searchCtrl = useRef<AbortController | undefined>(undefined);
+  const resolveCtrl = useRef<AbortController | undefined>(undefined);
 
   const hints = useMemo(
     () => extractLocationHints([item.title, item.note, item.sharedText].filter(Boolean).join('\n')),
@@ -50,9 +71,12 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
 
   const fillDetails = async (place: Place, seq: number) => {
     if (!needsDetails(place)) return;
+    const ctrl = new AbortController();
+    resolveCtrl.current = ctrl;
     setResolving(true);
     try {
-      const full = await resolvePlaceDetails(place);
+      // The user is waiting on this one: it goes ahead of background lookups.
+      const full = await resolvePlaceDetails(place, { signal: ctrl.signal });
       if (seq === pickSeq.current && full !== place) setPicked((p) => (p ? mergePlaceDetails(full, p) : full));
     } finally {
       if (seq === pickSeq.current) setResolving(false);
@@ -62,10 +86,23 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
   /** Picks a place and, when it's missing its city or country, looks them up. */
   const choose = (place: Place | undefined) => {
     const seq = ++pickSeq.current;
+    resolveCtrl.current?.abort();
     setPicked(place);
     setResolving(false);
     if (place) void fillDetails(place, seq);
   };
+
+  // While the sheet is open the user's lookups come first: background ones wait. Closing it cancels
+  // what's still pending (saving finishes the address lookup on its own).
+  useEffect(() => {
+    if (!open) return;
+    const release = holdBackgroundLookups();
+    return () => {
+      release();
+      searchCtrl.current?.abort();
+      resolveCtrl.current?.abort();
+    };
+  }, [open]);
 
   // Start fresh each time the sheet opens — not when the item changes underneath an open sheet.
   useEffect(() => {
@@ -96,20 +133,26 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
       setResults([]);
       return;
     }
-    setBusy(true);
+    searchCtrl.current?.abort();
+    const ctrl = new AbortController();
+    searchCtrl.current = ctrl;
+    setSearching(true);
     try {
-      const found = await searchPlaces(q, item.place);
+      const found = await searchPlaces(q, item.place, { signal: ctrl.signal, priority: 'user' });
       setResults(found);
       if (!found.length) toast('No places found — try adding the city.');
     } catch (e) {
-      toast((e as Error).message);
+      if (!isAbort(e)) toast((e as Error).message);
     } finally {
-      setBusy(false);
+      if (searchCtrl.current === ctrl) {
+        searchCtrl.current = undefined;
+        setSearching(false);
+      }
     }
   };
 
   const locate = async () => {
-    setBusy(true);
+    setLocating(true);
     try {
       // "I'm here now": the coordinates first, then what's here (venue, city, country).
       choose(await currentPosition());
@@ -117,7 +160,7 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
     } catch (e) {
       toast((e as Error).message);
     } finally {
-      setBusy(false);
+      setLocating(false);
     }
   };
 
@@ -188,6 +231,16 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
           <LocateFixed size={16} /> I'm here now
         </button>
       </div>
+      {slowSearch && (
+        <div className="row" style={{ marginTop: 8 }}>
+          <span className="hint" role="status" style={{ margin: 0 }}>
+            Still searching…
+          </span>
+          <button type="button" className="btn small outline" onClick={() => searchCtrl.current?.abort()}>
+            Cancel
+          </button>
+        </div>
+      )}
 
       {suggestions.length > 0 && (
         <div style={{ marginTop: 12 }}>
@@ -253,7 +306,11 @@ export function PlacePicker({ item, open, onClose }: { item: Item; open: boolean
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{heading}</div>
               <div className="hint" style={{ margin: 0, overflowWrap: 'anywhere' }}>
-                {resolving ? 'Looking up the address…' : subline || (label ? '' : coordsText(picked))}
+                {resolving
+                  ? slowResolve
+                    ? 'Still looking up the address — you can save now.'
+                    : 'Looking up the address…'
+                  : subline || (label ? '' : coordsText(picked))}
               </div>
             </div>
             {resolving && <span className="spinner" style={{ flex: '0 0 auto', color: 'var(--muted)' }} aria-hidden="true" />}

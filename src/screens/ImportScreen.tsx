@@ -1,10 +1,10 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { Check, Copy, ExternalLink, Smartphone } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useToast } from '../components/Toast';
 import { hostOf, safeUrl } from '../lib/classify';
 import { plural } from '../lib/format';
 import { isEmbeddedBrowser, isIos, isStandalone } from '../lib/install';
+import { useLiveQuery } from '../lib/live';
 import { takeInboxFile } from '../lib/receive';
 import { navigate } from '../lib/router';
 import { useSettings } from '../lib/settings';

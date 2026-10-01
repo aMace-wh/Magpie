@@ -1,5 +1,5 @@
 import { Plus, X } from 'lucide-react';
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { normalizeTag } from '../lib/classify';
 
 interface Props {
@@ -9,7 +9,7 @@ interface Props {
   suggestions?: string[];
 }
 
-export function TagInput({ tags, onChange, suggestions = [] }: Props) {
+export const TagInput = memo(function TagInput({ tags, onChange, suggestions = [] }: Props) {
   const [draft, setDraft] = useState('');
   const [adding, setAdding] = useState(false);
 
@@ -81,4 +81,4 @@ export function TagInput({ tags, onChange, suggestions = [] }: Props) {
       )}
     </div>
   );
-}
+});

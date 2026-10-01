@@ -1,4 +1,3 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { ChevronRight, Globe, LocateFixed, Map as MapIcon, Navigation } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CountryGroups } from '../components/CountryGroups';
@@ -8,6 +7,7 @@ import { WhenBadge } from '../components/WhenBadge';
 import { db } from '../lib/db';
 import { currentPosition, directionsLink } from '../lib/geo';
 import { addTiles, L, meIcon, pinIcon } from '../lib/leaflet';
+import { useLiveQuery } from '../lib/live';
 import { flagEmoji, placeLabel } from '../lib/location';
 import { takeMapFocus } from '../lib/mapFocus';
 import { navigate } from '../lib/router';

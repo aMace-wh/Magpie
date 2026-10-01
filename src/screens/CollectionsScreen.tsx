@@ -1,18 +1,20 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { FileInput, FolderPlus, Users, Zap } from 'lucide-react';
 import { useMemo, useState, type CSSProperties } from 'react';
 import { CollectionEditor } from '../components/CollectionEditor';
+import { DbStatus, Loading } from '../components/DbStatus';
 import { OpenShareFile } from '../components/OpenShareFile';
 import { safeUrl } from '../lib/classify';
 import { db } from '../lib/db';
 import { plural } from '../lib/format';
+import { useLiveQuery } from '../lib/live';
 import { navigate } from '../lib/router';
 import { itemsInCollection } from '../lib/smart';
 import { TYPE_INFO, type Collection, type Item } from '../lib/types';
 
 export function CollectionsScreen() {
   const collections = useLiveQuery(() => db.collections.orderBy('createdAt').reverse().toArray(), []);
-  const items = useLiveQuery(() => db.items.orderBy('createdAt').reverse().toArray(), []) ?? [];
+  const allItems = useLiveQuery(() => db.items.orderBy('createdAt').reverse().toArray(), []);
+  const items = allItems ?? [];
   const [editor, setEditor] = useState<{ smart: boolean } | null>(null);
   // Collections added from a friend's share get their own section.
   const [mine, friends] = useMemo(() => {
@@ -32,6 +34,10 @@ export function CollectionsScreen() {
         </button>
       </header>
 
+      <DbStatus />
+      {/* Wait for the saves too, so the tiles don't show "0 saves" first. */}
+      {(collections === undefined || (collections.length > 0 && allItems === undefined)) && <Loading label="Loading your collections…" />}
+
       {collections?.length === 0 && (
         <div className="empty">
           <div className="emoji">🗂️</div>
@@ -48,7 +54,7 @@ export function CollectionsScreen() {
         </div>
       )}
 
-      {mine.length > 0 && (
+      {mine.length > 0 && allItems && (
         <div className="col-grid">
           {mine.map((c) => (
             <CollectionTile key={c.id} collection={c} items={itemsInCollection(items, c)} />
@@ -56,7 +62,7 @@ export function CollectionsScreen() {
         </div>
       )}
 
-      {friends.length > 0 && (
+      {friends.length > 0 && allItems && (
         <section aria-labelledby="from-friends">
           <h2 className="section-title" id="from-friends">
             From friends

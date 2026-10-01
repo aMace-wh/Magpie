@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterItems, isFiltering, typeCounts, type ItemFilter } from './filter';
+import { cardsToRender, filterItems, isFiltering, typeCounts, type ItemFilter } from './filter';
 import type { Item } from './types';
 
 let n = 0;
@@ -83,10 +83,71 @@ describe('filterItems', () => {
     expect(search([odd], 'zz')).toEqual([]);
   });
 
-  it('sees edits, since a changed item is a new object', () => {
+  it('sees edits, since every write bumps updatedAt', () => {
     const a = item({ title: 'Old name' });
     expect(search([a], 'new')).toEqual([]);
-    expect(search([{ ...a, title: 'New name' }], 'new')).toEqual(['New name']);
+    const edited = { ...a, title: 'New name', updatedAt: a.updatedAt + 1 };
+    expect(search([edited], 'new')).toEqual(['New name']);
+    expect(search([edited], 'old')).toEqual([]);
+  });
+
+  it("reuses the search text for a live query's fresh copy of an unchanged save", () => {
+    const a = item({ title: 'Pastel de nata', tags: ['bakery'] });
+    expect(search([a], 'nata')).toEqual(['Pastel de nata']);
+    let reads = 0;
+    const copy = { ...a };
+    Object.defineProperty(copy, 'note', {
+      get: () => {
+        reads++;
+        return undefined;
+      },
+    });
+    expect(filterItems([copy], { ...all, query: 'bakery' })).toEqual([copy]);
+    expect(reads).toBe(0);
+  });
+
+  it("doesn't mix up unsaved items that share an id (share previews have no timestamps)", () => {
+    const preview = (title: string): Item => ({ id: '#0', type: 'link', title, tags: [], collectionIds: [], status: 'todo', createdAt: 0, updatedAt: 0 });
+    expect(search([preview('Ramen bar')], 'ramen')).toEqual(['Ramen bar']);
+    expect(search([preview('Taco truck')], 'ramen')).toEqual([]);
+    expect(search([preview('Taco truck')], 'taco')).toEqual(['Taco truck']);
+  });
+});
+
+describe('cardsToRender', () => {
+  const list = (n: number, prefix = 'i') => Array.from({ length: n }, (_, k) => ({ id: `${prefix}${k}` }));
+  const ids = (items: { id: string }[]) => new Set(items.map((i) => i.id));
+
+  it('renders a short list whole, and the first cards of a long one', () => {
+    expect(cardsToRender(list(12), new Set())).toBe(12);
+    expect(cardsToRender(list(150), new Set())).toBe(30);
+    expect(cardsToRender(list(150), new Set(), 10, 5)).toBe(10);
+  });
+
+  it('keeps every card when a save changes, adding at most one chunk', () => {
+    const items = list(150);
+    expect(cardsToRender(items, ids(items.slice(0, 60)))).toBe(90);
+    expect(cardsToRender(items, ids(items))).toBe(150);
+  });
+
+  it('keeps the cards on screen when one is added or removed', () => {
+    const items = list(150);
+    const shown = ids(items.slice(0, 60));
+    expect(cardsToRender([{ id: 'new' }, ...items], shown)).toBe(90);
+    expect(cardsToRender(items.slice(1), shown)).toBe(89);
+  });
+
+  it('starts again from the top for a different list', () => {
+    expect(cardsToRender(list(150, 'done'), ids(list(150)))).toBe(30);
+    // Mixed: the cards already shown stay, plus up to a chunk of new ones.
+    const mixed = list(150).flatMap((i, k) => [i, { id: `x${k}` }]);
+    expect(cardsToRender(mixed, ids(list(60)))).toBe(61);
+  });
+
+  it('shows every search result once they are all on screen', () => {
+    const items = list(150);
+    const results = items.filter((_, k) => k % 3 === 0);
+    expect(cardsToRender(results, ids(items))).toBe(results.length);
   });
 });
 

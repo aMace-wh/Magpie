@@ -132,3 +132,48 @@
   background: var(--surface-2);
   color: var(--text);
 }
+
+/* "Detecting…" while the first look at pasted or shared text is still being worked out. */
+.detected.save-detecting {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-weight: 600;
+  /* Only shows if it takes a moment, so fast devices don't flicker. */
+  animation: fade-in 0.2s ease 0.15s both;
+}
+
+.save-detecting .spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+/* While typing, the guess can be a step behind: dim it a touch if that lasts. */
+.save-analysis > .detected {
+  transition: opacity 0.15s ease;
+}
+
+.save-analysis[aria-busy='true'] > .detected {
+  opacity: 0.6;
+  transition-delay: 0.2s;
+}
+
+/* The form, read-only while saving: what's saved (or kept for a retry) is what's on screen. */
+.save-form {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.save-form:disabled {
+  /* Dims only if saving takes a moment, so a quick save doesn't flicker. */
+  opacity: 0.6;
+  transition: opacity 0.2s ease 0.4s;
+}
+
+.save-form:disabled .btn:disabled {
+  /* The form already looks dimmed. */
+  opacity: 1;
+}

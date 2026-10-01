@@ -1,5 +1,6 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { classify, itemFieldsFrom, normalizeTag, type SharedInput } from './classify';
+import { isAlreadySaved, isStorageFailure, isTimeout, monitorDb, saveWithRetry, type DbStatus } from './dbHealth';
 import { uid } from './id';
 import type { Collection, Item } from './types';
 import { findWhen } from './when';
@@ -18,6 +19,17 @@ db.version(2).stores({
   items: 'id, type, status, createdAt, updatedAt, doneAt, *tags, *collectionIds, when.start, place.countryCode',
   collections: 'id, createdAt, name, from.shareId',
 });
+
+/** How the database is doing (opening, slow, blocked, lost…), for the status banner and Diagnostics. */
+export const dbHealth = monitorDb(db, {
+  probe: () => db.items.limit(1).primaryKeys(),
+  doc: typeof document === 'undefined' ? undefined : document,
+});
+
+/** Closes and reopens the database once (concurrent calls share the attempt). */
+export const recoverDb = (reason?: string): Promise<void> => dbHealth.recover(reason);
+
+const STUCK = new Set<DbStatus>(['stuck', 'lost', 'error']);
 
 // ---------------------------------------------------------------------------
 // Items
@@ -39,6 +51,35 @@ export function buildItem(data: NewItem, now = Date.now()): Item {
 export async function addItem(data: NewItem): Promise<Item> {
   const item = buildItem(data);
   await db.items.add(item);
+  return item;
+}
+
+/**
+ * Saves a new item made with buildItem without ever waiting forever: a write that hangs (or fails because storage
+ * broke) reopens the database and is retried once, without saving it twice, all within 9 s. Rejects when
+ * storage still doesn't work. It only ever adds: saving again under the same id after a failure can't make a copy
+ * (even if the first write was only held up and lands later), and can't write over the save that's there either.
+ * That rejects with a ConstraintError (isAlreadySaved).
+ */
+export async function saveItem(item: Item): Promise<Item> {
+  try {
+    await saveWithRetry(item, {
+      write: (i) => db.items.add(i),
+      get: (id) => db.items.get(id),
+      // Each attempt is built afresh, so an earlier one's save has another createdAt.
+      isSame: (stored, i) => stored.createdAt === i.createdAt,
+      recover: recoverDb,
+      // Already known to be stuck: reopen first instead of waiting on it again.
+      recoverFirst: STUCK.has(dbHealth.getSnapshot().status),
+      onRetry: (e) => dbHealth.noteRetry('saving', e),
+    });
+  } catch (e) {
+    if (isTimeout(e)) dbHealth.reportTimeout('saving');
+    else if (isStorageFailure(e)) dbHealth.reportError('saving', e);
+    else if (isAlreadySaved(e)) dbHealth.reportOk('already saved');
+    throw e;
+  }
+  dbHealth.reportOk('saved');
   return item;
 }
 

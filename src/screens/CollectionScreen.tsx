@@ -1,8 +1,8 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { ArrowLeft, CalendarPlus, ListPlus, Pencil, Plus, Share2, Trash2, Users, Zap } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { CollectionEditor } from '../components/CollectionEditor';
 import { CountryGroups } from '../components/CountryGroups';
+import { DbStatus, Loading, useShowLoading } from '../components/DbStatus';
 import { Filters } from '../components/Filters';
 import { ItemGrid } from '../components/ItemCard';
 import { ItemPicker } from '../components/ItemPicker';
@@ -13,6 +13,7 @@ import { calendarEventFromItem, downloadIcs, toIcs, type CalendarEvent } from '.
 import { db, deleteCollection } from '../lib/db';
 import { filterItems, type ItemFilter } from '../lib/filter';
 import { plural } from '../lib/format';
+import { useLiveQuery } from '../lib/live';
 import { goBack, navigate } from '../lib/router';
 import { describeRules, itemsInCollection } from '../lib/smart';
 
@@ -32,6 +33,7 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
   const [surprise, setSurprise] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [view, setViewState] = useState<View>(() => views.get(id) ?? 'grid');
+  const showLoading = useShowLoading();
 
   const items = useMemo(() => (collection && all ? itemsInCollection(all, collection) : []), [all, collection]);
   const shown = useMemo(() => filterItems(items, filter), [items, filter]);
@@ -44,7 +46,21 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
     setViewState(v);
   };
 
-  if (collection === undefined || all === undefined) return null;
+  if (collection === undefined || all === undefined) {
+    // Usually a blink: nothing until it takes a moment, rather than a half header that jumps.
+    if (!showLoading) return null;
+    return (
+      <>
+        <header className="page-header">
+          <button className="icon-btn" aria-label="Back" onClick={() => goBack('/collections')}>
+            <ArrowLeft size={20} />
+          </button>
+        </header>
+        <DbStatus />
+        <Loading label="Loading this collection…" cards={2} />
+      </>
+    );
+  }
   if (collection === null) {
     return (
       <div className="empty">
@@ -93,6 +109,7 @@ export function CollectionScreen({ id, onAdd }: { id: string; onAdd: (collection
           <Pencil size={18} />
         </button>
       </header>
+      <DbStatus />
       <p className="subtitle">
         {sharedBy && (
           <>

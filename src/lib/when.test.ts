@@ -15,6 +15,7 @@ import {
   relativeWhen,
   toLocalIso,
   weekendRange,
+  whenBadge,
   whenFromFields,
   whenFromTexts,
   whenStatus,
@@ -450,5 +451,27 @@ describe('relativeWhen', () => {
     expect(relativeWhen({ start: '2026-10-20' }, NOW)).toBe('in 3 weeks');
     expect(relativeWhen({ start: '2027-01-05' }, NOW)).toBe('in 3 months');
     expect(relativeWhen({ start: 'nope' }, NOW)).toBe('');
+  });
+});
+
+describe('whenBadge', () => {
+  it('follows the time: tomorrow, then today, then over', () => {
+    const day = { start: '2026-10-01' };
+    expect(whenBadge(day, NOW)).toMatchObject({ tone: 'soon', text: 'Tomorrow', spoken: 'tomorrow' });
+    expect(whenBadge(day, at(2026, 10, 1, 0, 1))).toMatchObject({ tone: 'on', text: 'Today', spoken: '' });
+    expect(whenBadge(day, at(2026, 10, 2, 0, 1))).toMatchObject({ tone: 'past', spoken: 'ended' });
+  });
+
+  it('says a timed event is on now while it runs', () => {
+    const gig = { start: '2026-09-30T21:30', end: '2026-09-30T23:00' };
+    expect(whenBadge(gig, at(2026, 9, 30, 21, 29))).toMatchObject({ tone: 'soon', spoken: 'today' });
+    expect(whenBadge(gig, at(2026, 9, 30, 21, 30))).toMatchObject({ tone: 'on', text: 'On now', spoken: '' });
+    expect(whenBadge(gig, at(2026, 9, 30, 23, 1))).toMatchObject({ tone: 'past', spoken: 'ended' });
+  });
+
+  it('says when a range on now ends, and how far off later ones are', () => {
+    expect(whenBadge({ start: '2026-09-25', end: '2026-10-01' }, NOW)).toMatchObject({ tone: 'on', text: 'On now · until tomorrow' });
+    expect(whenBadge({ start: '2026-10-20' }, NOW)).toMatchObject({ tone: 'later', spoken: 'in 3 weeks' });
+    expect(whenBadge({ start: 'nope' }, NOW)).toBeUndefined();
   });
 });

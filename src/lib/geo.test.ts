@@ -1,5 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { addressDetails, NOMINATIM_GAP_MS, resetGeoState, reverseGeocode, searchPlaces } from './geo';
+import {
+  addressDetails,
+  backgroundSignal,
+  BREAKER_PAUSE_MS,
+  geoHealth,
+  holdBackgroundLookups,
+  LOOKUP_TIMEOUT_MS,
+  lookupReport,
+  NOMINATIM_GAP_MS,
+  resetGeoState,
+  reverseGeocode,
+  searchPlaces,
+  whenUserIdle,
+} from './geo';
 
 const json = (body: unknown, status = 200) =>
   ({ ok: status >= 200 && status < 300, status, json: async () => body }) as unknown as Response;
@@ -129,7 +142,7 @@ describe('searchPlaces', () => {
     );
     const slow = searchPlaces('Somewhere slow');
     const check = expect(slow).rejects.toThrow(/took too long/);
-    await vi.advanceTimersByTimeAsync(12000);
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS.user);
     await check;
   });
 });
@@ -281,6 +294,305 @@ describe('politeness queue and cache', () => {
     resetGeoState();
     await searchPlaces('Tallinn');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/** A fetch that never answers until aborted (a phone network where Nominatim hangs). */
+const hang = (_url: string, init: RequestInit) =>
+  new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+
+/** Fetches that wait to be answered one by one; `asked()` lists the queries / coordinates in the order sent. */
+function heldFetches() {
+  const pending: { url: URL; answer: (body: unknown) => void }[] = [];
+  fetchMock.mockImplementation(
+    (url: string, init: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        pending.push({ url: new URL(url), answer: (body) => resolve(json(body)) });
+        init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      }),
+  );
+  const asked = () => pending.map((p) => p.url.searchParams.get('q') ?? p.url.searchParams.get('lat'));
+  return { pending, asked };
+}
+
+const bg = { priority: 'background' } as const;
+
+describe('priority lanes', () => {
+  it('runs a user lookup next, ahead of background ones queued before it', async () => {
+    const { pending, asked } = heldFetches();
+    const background = ['A', 'B', 'C'].map((q) => searchPlaces(q, undefined, bg));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(asked()).toEqual(['A']);
+
+    const mine = searchPlaces('Wan Chai');
+    expect(geoHealth().userBusy).toBe(true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(asked()).toEqual(['A']); // waits for the one in flight, and the gap
+    pending[0].answer([]);
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS - 500);
+    expect(asked()).toEqual(['A', 'Wan Chai']);
+
+    pending[1].answer([]);
+    expect(await mine).toEqual([]);
+    expect(geoHealth().userBusy).toBe(false);
+    // Then the background ones, the gap still kept.
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS - 1);
+    expect(asked()).toEqual(['A', 'Wan Chai']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(asked()).toEqual(['A', 'Wan Chai', 'B']);
+    pending[2].answer([]);
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS);
+    pending[3].answer([]);
+    await Promise.all(background);
+    expect(asked()).toEqual(['A', 'Wan Chai', 'B', 'C']);
+  });
+
+  it('cuts a slow background request short once the gap is up, so a user lookup waits at most the gap', async () => {
+    const { pending, asked } = heldFetches();
+    const a = searchPlaces('A', undefined, bg);
+    void searchPlaces('B', undefined, bg);
+    await vi.advanceTimersByTimeAsync(300);
+    const mine = searchPlaces('Mine');
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS - 301);
+    expect(asked()).toEqual(['A']);
+    await vi.advanceTimersByTimeAsync(1);
+    // …only up to the gap: A makes way.
+    expect(asked()).toEqual(['A', 'Mine']);
+    pending[1].answer([]);
+    expect(await mine).toEqual([]);
+    // A goes again, ahead of B, and nothing counts it as a failure.
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS);
+    expect(asked()).toEqual(['A', 'Mine', 'A']);
+    expect(geoHealth().troubles).toBe(0);
+    pending[2].answer([{ lat: '1', lon: '2', name: 'Found' }]);
+    expect(await a).toEqual([expect.objectContaining({ name: 'Found' })]);
+  });
+
+  it('ends a user lookup within the gap plus its own timeout, even behind a hanging background one', async () => {
+    fetchMock.mockImplementation(hang);
+    void reverseGeocode(1, 1, bg);
+    await vi.advanceTimersByTimeAsync(0);
+    let settled = false;
+    const mine = searchPlaces('Mine')
+      .catch((e: unknown) => e)
+      .finally(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS + LOOKUP_TIMEOUT_MS.user - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(((await mine) as Error).message).toMatch(/took too long/);
+    expect(NOMINATIM_GAP_MS + LOOKUP_TIMEOUT_MS.user).toBeLessThanOrEqual(12000);
+  });
+
+  it("doesn't cut short a background request someone joined", async () => {
+    const { pending, asked } = heldFetches();
+    const shared = searchPlaces('Kyoto', undefined, bg);
+    await vi.advanceTimersByTimeAsync(0);
+    const mine = searchPlaces('kyoto');
+    void searchPlaces('Other');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(asked()).toEqual(['Kyoto']);
+    pending[0].answer([]);
+    expect(await mine).toEqual([]);
+    expect(await shared).toEqual([]);
+  });
+
+  it('lets a user lookup that arrives during the gap go first', async () => {
+    const { pending, asked } = heldFetches();
+    void searchPlaces('A', undefined, bg);
+    void searchPlaces('B', undefined, bg);
+    await vi.advanceTimersByTimeAsync(300);
+    pending[0].answer([]); // answers quickly; B waits out the gap
+    await vi.advanceTimersByTimeAsync(300);
+    const mine = searchPlaces('Mine');
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS - 601);
+    expect(asked()).toEqual(['A']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(asked()).toEqual(['A', 'Mine']);
+    pending[1].answer([]);
+    expect(await mine).toEqual([]);
+  });
+
+  it('moves a queued background lookup up when someone starts waiting on it', async () => {
+    const { pending, asked } = heldFetches();
+    void searchPlaces('A', undefined, bg);
+    void searchPlaces('B', undefined, bg);
+    const shared = searchPlaces('Kyoto', undefined, bg);
+    const mine = searchPlaces('kyoto');
+    await vi.advanceTimersByTimeAsync(0);
+    pending[0].answer([]);
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS);
+    expect(asked()).toEqual(['A', 'Kyoto']);
+    pending[1].answer([]);
+    expect(await mine).toEqual([]);
+    expect(await shared).toEqual([]);
+  });
+
+  it('keeps a shared lookup going while anyone still wants it', async () => {
+    const { pending, asked } = heldFetches();
+    void searchPlaces('First');
+    const a = new AbortController();
+    const b = new AbortController();
+    const one = searchPlaces('Oslo', undefined, { signal: a.signal });
+    const two = searchPlaces('Oslo', undefined, { signal: b.signal });
+    const oneCancelled = expect(one).rejects.toMatchObject({ name: 'AbortError' });
+    a.abort();
+    await oneCancelled;
+    pending[0].answer([]);
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS);
+    expect(asked()).toEqual(['First', 'Oslo']);
+    pending[1].answer([]);
+    expect(await two).toEqual([]);
+  });
+
+  it('gives background lookups a shorter timeout', async () => {
+    fetchMock.mockImplementation(hang);
+    let settled = false;
+    const slow = searchPlaces('Somewhere slow', undefined, bg).finally(() => (settled = true));
+    const check = expect(slow).rejects.toThrow(/took too long/);
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS.background - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await check;
+    expect(LOOKUP_TIMEOUT_MS.background).toBeLessThanOrEqual(6000);
+    expect(LOOKUP_TIMEOUT_MS.background).toBeLessThan(LOOKUP_TIMEOUT_MS.user);
+  });
+
+  it('treats lookups made with a background signal as background work', async () => {
+    fetchMock.mockImplementation(hang);
+    const parent = new AbortController();
+    const signal = backgroundSignal(parent.signal);
+    let result: unknown = 'pending';
+    void reverseGeocode(38.7, -9.14, { signal }).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS.background);
+    expect(result).toBeUndefined(); // gave up at the background timeout
+    parent.abort();
+    expect(signal.aborted).toBe(true);
+  });
+
+  it('holds background lookups while asked to, never user ones', async () => {
+    fetchMock.mockResolvedValue(json([]));
+    const release = holdBackgroundLookups();
+    expect(geoHealth().userBusy).toBe(true);
+    const background = searchPlaces('Background', undefined, bg);
+    const mine = searchPlaces('Mine');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await mine).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    let idle = false;
+    void whenUserIdle().then(() => (idle = true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(idle).toBe(false);
+    release();
+    release(); // harmless
+    await vi.advanceTimersByTimeAsync(0);
+    expect(idle).toBe(true);
+    expect(await background).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('lookupReport', () => {
+  it('says whether a lookup was asked, and whether it ran into trouble', async () => {
+    fetchMock.mockResolvedValueOnce(json({ address: { country_code: 'pt' } }));
+    const answered = backgroundSignal();
+    await reverseGeocode(1, 1, { signal: answered });
+    expect(lookupReport(answered)).toEqual({ asked: true, troubled: false });
+
+    // Cached: the answer is known, so it counts as asked.
+    const again = backgroundSignal();
+    await reverseGeocode(1, 1, { signal: again });
+    expect(lookupReport(again)).toEqual({ asked: true, troubled: false });
+
+    fetchMock.mockImplementation(hang);
+    const timedOut = backgroundSignal();
+    const p = reverseGeocode(2, 2, { signal: timedOut });
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS + LOOKUP_TIMEOUT_MS.background);
+    await p;
+    expect(lookupReport(timedOut)).toEqual({ asked: true, troubled: true });
+    expect(lookupReport(new AbortController().signal)).toEqual({ asked: false, troubled: false });
+  });
+
+  it("doesn't count a lookup dropped by the breaker, or cancelled, as asked", async () => {
+    fetchMock.mockImplementation(hang);
+    void searchPlaces('a', undefined, bg).catch(() => {});
+    void searchPlaces('b', undefined, bg).catch(() => {});
+    const dropped = backgroundSignal();
+    const lookup = reverseGeocode(3, 3, { signal: dropped });
+    const parent = new AbortController();
+    const cancelled = backgroundSignal(parent.signal);
+    const gone = reverseGeocode(4, 4, { signal: cancelled });
+    parent.abort();
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS + 2 * LOOKUP_TIMEOUT_MS.background);
+    expect(await lookup).toBeUndefined();
+    expect(await gone).toBeUndefined();
+    expect(geoHealth().paused).toBe(true);
+    expect(lookupReport(dropped)).toEqual({ asked: false, troubled: false });
+    expect(lookupReport(cancelled)).toEqual({ asked: false, troubled: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('circuit breaker', () => {
+  it('pauses background lookups after two failures in a row, but never user lookups', async () => {
+    fetchMock.mockImplementation(hang);
+    const a = reverseGeocode(1, 1, bg);
+    const b = reverseGeocode(2, 2, bg);
+    const c = searchPlaces('Queued', undefined, bg);
+    const dropped = expect(c).rejects.toMatchObject({ name: 'GeoPausedError' });
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS.background);
+    expect(geoHealth()).toMatchObject({ paused: false, troubles: 1 });
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS.background);
+    expect(geoHealth()).toMatchObject({ paused: true, troubles: 2 });
+    expect(await a).toBeUndefined();
+    expect(await b).toBeUndefined();
+    await dropped; // the queued one gave up without asking
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // New background lookups are refused straight away…
+    await expect(searchPlaces('Later', undefined, bg)).rejects.toMatchObject({ name: 'GeoPausedError' });
+    expect(await reverseGeocode(3, 3, bg)).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // …user lookups still go out (and their failures don't count).
+    const mine = searchPlaces('Mine');
+    const check = expect(mine).rejects.toThrow(/took too long/);
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS.user);
+    await check;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    // Background work resumes after the pause.
+    await vi.advanceTimersByTimeAsync(BREAKER_PAUSE_MS);
+    expect(geoHealth().paused).toBe(false);
+    fetchMock.mockResolvedValue(json([]));
+    const later = searchPlaces('Later', undefined, bg);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await later).toEqual([]);
+  });
+
+  it('counts network errors and resumes when the device comes back online', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('window', win);
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    void reverseGeocode(1, 1, bg);
+    void reverseGeocode(2, 2, bg);
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS);
+    expect(geoHealth().paused).toBe(true);
+    win.dispatchEvent(new Event('online'));
+    expect(geoHealth().paused).toBe(false);
+  });
+
+  it('closes again on any answer', async () => {
+    fetchMock.mockImplementation(hang);
+    void reverseGeocode(1, 1, bg);
+    await vi.advanceTimersByTimeAsync(LOOKUP_TIMEOUT_MS.background);
+    fetchMock.mockResolvedValue(json([]));
+    await searchPlaces('Fine');
+    fetchMock.mockImplementation(hang);
+    void reverseGeocode(2, 2, bg);
+    await vi.advanceTimersByTimeAsync(NOMINATIM_GAP_MS + LOOKUP_TIMEOUT_MS.background);
+    // One failure since the last answer: not paused.
+    expect(geoHealth()).toMatchObject({ paused: false, troubles: 2 });
   });
 });
 

@@ -4,30 +4,95 @@ export interface GeoResult extends Place {
   name: string;
 }
 
+/**
+ * 'user': someone is waiting on the answer (the default). 'background': enrichment and backfill — waits
+ * behind user lookups, gives up sooner and backs off when the service can't be reached.
+ */
+export type GeoPriority = 'user' | 'background';
+
 export interface GeoOptions {
   signal?: AbortSignal;
+  /** Default 'user' — or 'background' when `signal` came from backgroundSignal(). */
+  priority?: GeoPriority;
 }
 
 const NOMINATIM = 'https://nominatim.openstreetmap.org';
 /** Nominatim's usage policy: at most one request per second. A little slack on top. */
 export const NOMINATIM_GAP_MS = 1100;
-const TIMEOUT_MS = 12000;
+/**
+ * How long one lookup may take. A user lookup waits at most NOMINATIM_GAP_MS for its turn (a background one in
+ * flight makes way), so its spinner stops within about 11 s. Nobody waits on a background one: it gives up sooner.
+ */
+export const LOOKUP_TIMEOUT_MS: Readonly<Record<GeoPriority, number>> = { user: 10000, background: 6000 };
+/** Background lookups pause after this many timeouts / network errors in a row… */
+export const BREAKER_FAILURES = 2;
+/** …for this long, or until the device comes back online. User lookups are never paused. */
+export const BREAKER_PAUSE_MS = 10 * 60 * 1000;
 const CACHE_MAX = 300;
 
 // ---------------------------------------------------------------------------
-// Politeness queue + cache, shared by every Nominatim call in the app.
+// Politeness queue + cache, shared by every Nominatim call in the app. One request at a time, each at
+// least NOMINATIM_GAP_MS after the last. Queued user lookups always go before queued background ones, and a
+// background request still going when the gap is up makes way (it's tried again after), so a user lookup
+// waits at most NOMINATIM_GAP_MS for its turn.
 
-let chain: Promise<unknown> = Promise.resolve();
-let lastStart = Number.NEGATIVE_INFINITY;
+interface Job {
+  key: string;
+  priority: GeoPriority;
+  load: (signal: AbortSignal, timeoutMs: number) => Promise<unknown>;
+  /** Cancels the request once every caller has given up on it. */
+  ctrl: AbortController;
+  /** Callers still waiting (one without a signal never leaves). */
+  waiters: number;
+  started: boolean;
+  /** The request in flight, which a user lookup can cut short (`preempted`) to go first. */
+  attempt?: AbortController;
+  preempted: boolean;
+  /** Someone joined while it was in flight: it isn't cut short. */
+  userJoined: boolean;
+  /** Callers' signals, for lookupReport(). */
+  signals: AbortSignal[];
+  promise: Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
+}
+
+const lanes: Record<GeoPriority, Job[]> = { user: [], background: [] };
+/** Queued or in flight, by cache key: identical lookups share one request. */
+const jobs = new Map<string, Job>();
 const cache = new Map<string, unknown>();
-const inflight = new Map<string, Promise<unknown>>();
+let lastStart = Number.NEGATIVE_INFINITY;
+let current: Job | undefined;
+let pumping = false;
+/** Bumped by resetGeoState, so a runner from before the reset stops. */
+let generation = 0;
+/** Open holdBackgroundLookups() calls. */
+let holds = 0;
+let idleWaiters: (() => void)[] = [];
+// Circuit breaker for background lookups.
+let failuresInARow = 0;
+let pausedUntil = 0;
+let troubles = 0;
+let listening = false;
+let preemptTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** Clears the request queue and cache. For tests. */
+/** Clears the request queue, cache and back-off. For tests. */
 export function resetGeoState(): void {
-  chain = Promise.resolve();
-  lastStart = Number.NEGATIVE_INFINITY;
+  generation++;
+  lanes.user = [];
+  lanes.background = [];
+  jobs.clear();
   cache.clear();
-  inflight.clear();
+  lastStart = Number.NEGATIVE_INFINITY;
+  current = undefined;
+  pumping = false;
+  holds = 0;
+  idleWaiters = [];
+  failuresInARow = 0;
+  pausedUntil = 0;
+  troubles = 0;
+  listening = false;
+  clearTimeout(preemptTimer);
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -38,19 +103,265 @@ function abortError(): Error {
   return e;
 }
 
-/** Runs tasks one at a time, each starting at least NOMINATIM_GAP_MS after the previous one. */
-function enqueue<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  const run = async (): Promise<T> => {
-    const wait = lastStart + NOMINATIM_GAP_MS - Date.now();
-    if (wait > 0) await sleep(wait);
-    // Cancelled while queued: skip without using up a slot.
-    if (signal?.aborted) throw abortError();
-    lastStart = Date.now();
-    return task();
+function pausedError(): Error {
+  const e = new Error('Place lookups are paused for a bit — the connection seems poor.');
+  e.name = 'GeoPausedError';
+  return e;
+}
+
+// Timeouts, network errors and an overloaded service: reasons for background work to back off.
+const TROUBLE = new WeakSet<object>();
+function trouble(message: string): Error {
+  const e = new Error(message);
+  TROUBLE.add(e);
+  return e;
+}
+const isTrouble = (e: unknown) => typeof e === 'object' && e !== null && TROUBLE.has(e);
+
+const backgroundSignals = new WeakSet<AbortSignal>();
+
+/**
+ * A signal that marks the lookups made with it as background work — for code that only passes a signal
+ * on (resolvePlaceDetails). Aborts along with `parent`.
+ */
+export function backgroundSignal(parent?: AbortSignal): AbortSignal {
+  const ctrl = new AbortController();
+  if (parent?.aborted) ctrl.abort();
+  else parent?.addEventListener('abort', () => ctrl.abort(), { once: true });
+  backgroundSignals.add(ctrl.signal);
+  return ctrl.signal;
+}
+
+export interface LookupReport {
+  /** A request went out and got an answer, or failed by itself (not cancelled or paused); or the answer was cached. */
+  asked: boolean;
+  /** …and it timed out, couldn't reach the service, or the service was busy. */
+  troubled: boolean;
+}
+
+const reports = new WeakMap<AbortSignal, LookupReport>();
+
+/**
+ * What became of the lookups made with `signal` (one per job, e.g. from backgroundSignal()): whether they were
+ * actually asked, rather than dropped because lookups were paused or cancelled.
+ */
+export function lookupReport(signal: AbortSignal): LookupReport {
+  return reports.get(signal) ?? { asked: false, troubled: false };
+}
+
+function report(signals: Iterable<AbortSignal>, troubled: boolean): void {
+  for (const s of signals) reports.set(s, { asked: true, troubled: troubled || lookupReport(s).troubled });
+}
+
+const priorityOf = (opts: GeoOptions): GeoPriority =>
+  opts.priority ?? (opts.signal && backgroundSignals.has(opts.signal) ? 'background' : 'user');
+
+const paused = () => Date.now() < pausedUntil;
+
+/** Any answer — or the device coming back online — closes the breaker. */
+function healthy(): void {
+  failuresInARow = 0;
+  pausedUntil = 0;
+}
+
+function failed(priority: GeoPriority): void {
+  troubles++;
+  if (priority !== 'background' || ++failuresInARow < BREAKER_FAILURES) return;
+  pausedUntil = Date.now() + BREAKER_PAUSE_MS;
+  if (!listening && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    listening = true;
+    window.addEventListener('online', healthy);
+  }
+  // Queued background lookups give up now, not one timeout at a time.
+  for (const job of lanes.background.splice(0)) {
+    settle(job);
+    job.reject(pausedError());
+  }
+}
+
+const userIdle = () => holds === 0 && lanes.user.length === 0 && current?.priority !== 'user';
+
+function checkIdle(): void {
+  if (!idleWaiters.length || !userIdle()) return;
+  const waiting = idleWaiters;
+  idleWaiters = [];
+  for (const wake of waiting) wake();
+}
+
+export interface GeoHealth {
+  /** Background lookups are paused after repeated timeouts / network errors (user lookups never are). */
+  paused: boolean;
+  /** Timeouts, network errors and "service busy" replies so far — compare before and after a lookup. */
+  troubles: number;
+  /** A user lookup is waiting or running, or background lookups are on hold. */
+  userBusy: boolean;
+}
+
+export function geoHealth(): GeoHealth {
+  return { paused: paused(), troubles, userBusy: !userIdle() };
+}
+
+/** Resolves once no user lookup is waiting or running and nothing holds background lookups. */
+export function whenUserIdle(): Promise<void> {
+  if (userIdle()) return Promise.resolve();
+  return new Promise((resolve) => idleWaiters.push(resolve));
+}
+
+/**
+ * Keeps background lookups from starting (user lookups still run) until the returned release is called —
+ * e.g. while a place picker is open. Releasing twice is harmless.
+ */
+export function holdBackgroundLookups(): () => void {
+  holds++;
+  const gen = generation;
+  let held = true;
+  return () => {
+    if (!held || gen !== generation) return;
+    held = false;
+    holds--;
+    checkIdle();
+    void pump();
   };
-  const p = chain.then(run, run);
-  chain = p.catch(() => undefined);
-  return p;
+}
+
+function settle(job: Job): void {
+  if (jobs.get(job.key) === job) jobs.delete(job.key);
+}
+
+function unqueue(job: Job): void {
+  const lane = lanes[job.priority];
+  const i = lane.indexOf(job);
+  if (i >= 0) lane.splice(i, 1);
+}
+
+function newJob(key: string, priority: GeoPriority, load: Job['load']): Job {
+  let resolve!: (value: unknown) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<unknown>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  const job: Job = {
+    key,
+    priority,
+    load,
+    ctrl: new AbortController(),
+    waiters: 0,
+    started: false,
+    preempted: false,
+    userJoined: false,
+    signals: [],
+    promise,
+    resolve,
+    reject,
+  };
+  jobs.set(key, job);
+  lanes[priority].push(job);
+  return job;
+}
+
+/** One caller's interest in a job; its own signal cancels just that caller. */
+function join(job: Job, signal?: AbortSignal): Promise<unknown> {
+  job.waiters++;
+  if (!signal) return job.promise;
+  job.signals.push(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      reject(abortError());
+      leave(job);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void job.promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+function leave(job: Job): void {
+  if (--job.waiters > 0) return;
+  // Nobody wants it any more: cancel the request, or drop it from the queue without using up a slot.
+  job.ctrl.abort();
+  if (job.started) return;
+  unqueue(job);
+  settle(job);
+  job.reject(abortError());
+  checkIdle();
+}
+
+const nextJob = (): Job | undefined => lanes.user[0] ?? (holds > 0 ? undefined : lanes.background[0]);
+
+async function run(job: Job): Promise<void> {
+  unqueue(job);
+  job.started = true;
+  current = job;
+  lastStart = Date.now();
+  // This request only: a user lookup may cut it short, and the job then goes back in the queue.
+  const attempt = new AbortController();
+  const stop = () => attempt.abort();
+  job.ctrl.signal.addEventListener('abort', stop, { once: true });
+  job.attempt = attempt;
+  try {
+    const value = await job.load(attempt.signal, LOOKUP_TIMEOUT_MS[job.priority]);
+    healthy();
+    remember(job.key, value);
+    report(job.signals, false);
+    settle(job);
+    job.resolve(value);
+  } catch (e) {
+    if (job.preempted && !job.ctrl.signal.aborted) {
+      // Made way for a user lookup: first in its lane again, to go once that's done.
+      job.preempted = false;
+      job.started = false;
+      lanes[job.priority].unshift(job);
+      return;
+    }
+    const troubled = isTrouble(e);
+    if (troubled) failed(job.priority);
+    if (!job.ctrl.signal.aborted && (e as Error | null)?.name !== 'AbortError') report(job.signals, troubled);
+    settle(job);
+    job.reject(e);
+  } finally {
+    job.ctrl.signal.removeEventListener('abort', stop);
+    job.attempt = undefined;
+    if (current === job) current = undefined;
+    checkIdle();
+  }
+}
+
+/**
+ * A user lookup is waiting behind a background request in flight: once the gap since that request started is up,
+ * cut it short so the user's goes next. Nobody waits on the background one; it's tried again afterwards.
+ */
+function preempt(): void {
+  clearTimeout(preemptTimer);
+  const job = current;
+  if (!job || job.priority !== 'background' || job.userJoined || !lanes.user.length) return;
+  const wait = lastStart + NOMINATIM_GAP_MS - Date.now();
+  if (wait > 0) {
+    preemptTimer = setTimeout(preempt, wait);
+    return;
+  }
+  job.preempted = true;
+  job.attempt?.abort();
+}
+
+/** The single runner: user lane first, the gap between requests always kept. */
+async function pump(): Promise<void> {
+  if (pumping) return;
+  pumping = true;
+  const gen = generation;
+  try {
+    for (let job = nextJob(); job; job = nextJob()) {
+      const wait = lastStart + NOMINATIM_GAP_MS - Date.now();
+      if (wait > 0) {
+        // Then look again: a user lookup may have come in meanwhile.
+        await sleep(wait);
+      } else {
+        await run(job);
+      }
+      if (gen !== generation) return;
+    }
+  } finally {
+    if (gen === generation) pumping = false;
+  }
 }
 
 function remember(key: string, value: unknown): void {
@@ -60,26 +371,34 @@ function remember(key: string, value: unknown): void {
 }
 
 /** Cached, de-duplicated, queued lookup. Failures are not cached. */
-function cached<T>(key: string, load: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+function cached<T>(key: string, load: Job['load'], opts: GeoOptions): Promise<T> {
+  const { signal } = opts;
   if (cache.has(key)) {
     const hit = cache.get(key) as T;
     remember(key, hit);
+    if (signal) report([signal], false);
     return Promise.resolve(hit);
   }
-  const pending = inflight.get(key) as Promise<T> | undefined;
-  if (pending) return pending;
-  const p = enqueue(load, signal).then(
-    (value) => {
-      inflight.delete(key);
-      remember(key, value);
-      return value;
-    },
-    (err: unknown) => {
-      inflight.delete(key);
-      throw err;
-    },
-  );
-  inflight.set(key, p);
+  if (signal?.aborted) return Promise.reject(abortError());
+  const priority = priorityOf(opts);
+  let job = jobs.get(key);
+  if (job && priority === 'user' && job.priority === 'background') {
+    if (job.started) {
+      // In flight already: let it finish rather than cut it short.
+      job.userJoined = true;
+    } else {
+      // Someone is waiting on it now: move it up.
+      unqueue(job);
+      job.priority = 'user';
+      lanes.user.push(job);
+    }
+  } else if (!job) {
+    if (priority === 'background' && paused()) return Promise.reject(pausedError());
+    job = newJob(key, priority, load);
+  }
+  const p = join(job, signal) as Promise<T>;
+  if (priority === 'user') preempt();
+  void pump();
   return p;
 }
 
@@ -91,19 +410,23 @@ function language(): string {
   }
 }
 
-/** fetch with a timeout, also cancellable by the caller's signal. */
-async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
+/** fetch with a timeout, also cancellable by the signal. */
+async function getJson(url: string, signal: AbortSignal, timeoutMs: number): Promise<unknown> {
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
-  if (signal?.aborted) throw abortError();
-  signal?.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  if (signal.aborted) throw abortError();
+  signal.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: { accept: 'application/json', 'accept-language': language() },
     });
-    if (!res.ok) throw new Error(`Place search failed (${res.status})`);
+    if (!res.ok) {
+      const message = `Place search failed (${res.status})`;
+      // Rate-limited or the service is struggling: worth backing off.
+      throw res.status === 429 || res.status >= 500 ? trouble(message) : new Error(message);
+    }
     try {
       return await res.json();
     } catch (e) {
@@ -112,13 +435,13 @@ async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
       throw new Error('Place search returned something unexpected — try again.');
     }
   } catch (e) {
-    if (signal?.aborted) throw abortError();
-    if (ctrl.signal.aborted) throw new Error('Place search took too long — try again.');
-    if (e instanceof TypeError) throw new Error('Couldn’t reach place search — check your connection.');
+    if (signal.aborted) throw abortError();
+    if (ctrl.signal.aborted) throw trouble('Place search took too long — try again.');
+    if (e instanceof TypeError) throw trouble('Couldn’t reach place search — check your connection.');
     throw e;
   } finally {
     clearTimeout(timer);
-    signal?.removeEventListener('abort', onAbort);
+    signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -239,7 +562,8 @@ function toResult(row: NominatimRow): GeoResult | undefined {
 /**
  * Place search via OpenStreetMap Nominatim. Their usage policy allows light,
  * user-initiated searches (no autocomplete), so this only runs on submit.
- * Throws a friendly Error when the service can't be reached.
+ * Throws a friendly Error when the service can't be reached. Pass
+ * `{ priority: 'background' }` for lookups nobody is waiting on.
  */
 export async function searchPlaces(query: string, near?: Place, opts: GeoOptions = {}): Promise<GeoResult[]> {
   const q = query.replace(/\s+/g, ' ').trim();
@@ -255,15 +579,15 @@ export async function searchPlaces(query: string, near?: Place, opts: GeoOptions
   const key = `search|${lang}|${q.toLowerCase()}|${area}`;
   return cached(
     key,
-    async () => {
-      const rows = await getJson(`${NOMINATIM}/search?${params}`, opts.signal);
+    async (signal, timeoutMs) => {
+      const rows = await getJson(`${NOMINATIM}/search?${params}`, signal, timeoutMs);
       if (!Array.isArray(rows)) return [];
       return rows
         .filter(isRow)
         .map(toResult)
         .filter((r): r is GeoResult => !!r);
     },
-    opts.signal,
+    opts,
   );
 }
 
@@ -280,8 +604,8 @@ export async function reverseGeocode(lat: number, lng: number, opts: GeoOptions 
   try {
     return await cached(
       key,
-      async () => {
-        const row = await getJson(`${NOMINATIM}/reverse?${params}`, opts.signal);
+      async (signal, timeoutMs) => {
+        const row = await getJson(`${NOMINATIM}/reverse?${params}`, signal, timeoutMs);
         if (!isRow(row) || row.error) return undefined;
         const details = addressDetails(row.address);
         const out: Partial<Place> = { ...details };
@@ -291,7 +615,7 @@ export async function reverseGeocode(lat: number, lng: number, opts: GeoOptions 
         if (address) out.address = address;
         return Object.keys(out).length ? out : undefined;
       },
-      opts.signal,
+      opts,
     );
   } catch {
     return undefined;

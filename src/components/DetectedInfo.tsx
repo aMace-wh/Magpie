@@ -1,4 +1,5 @@
 import { MapPin, Sparkles } from 'lucide-react';
+import { memo } from 'react';
 import { hostOf, sourceLabel, type Classification } from '../lib/classify';
 import { ITEM_TYPES, TYPE_INFO, type ItemType } from '../lib/types';
 import './DetectedInfo.css';
@@ -16,7 +17,7 @@ function article(t: ItemType): string {
 }
 
 /** What Magpie thinks a save is, why it thinks so, and one-tap fixes when it guessed wrong. */
-export function DetectedInfo({ guess, type, onTypeChange }: Props) {
+export const DetectedInfo = memo(function DetectedInfo({ guess, type, onTypeChange }: Props) {
   const isGuess = type === guess.type;
   const web = guess.url && /^https?:/i.test(guess.url) ? hostOf(guess.url) : '';
   const platform = sourceLabel(guess.source) ?? (web || undefined);
@@ -84,4 +85,4 @@ export function DetectedInfo({ guess, type, onTypeChange }: Props) {
       )}
     </div>
   );
-}
+});

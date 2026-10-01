@@ -19,14 +19,21 @@ function countryNames(code?: string): string[] {
   return c ? [countryName(c), countryName(c, 'en')] : [];
 }
 
-// Items from a live query are replaced when they change, so caching per object is safe.
-const cache = new WeakMap<Item, string>();
+// Live queries hand out fresh copies on every write, so the search text is cached per save and version (every
+// write bumps updatedAt), not per object. Unsaved items (share previews have no timestamps) go by object.
+const byVersion = new Map<string, { at: number; text: string }>();
+const byObject = new WeakMap<Item, string>();
 
 function haystack(i: Item): string {
-  let h = cache.get(i);
-  if (h !== undefined) return h;
+  const saved = i.updatedAt > 0;
+  const hit = saved ? byVersion.get(i.id) : undefined;
+  if (hit?.at === i.updatedAt) return hit.text;
+  if (!saved) {
+    const h = byObject.get(i);
+    if (h !== undefined) return h;
+  }
   const p = i.place;
-  h = [
+  const text = [
     i.title,
     i.note,
     i.description,
@@ -46,8 +53,9 @@ function haystack(i: Item): string {
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
-  cache.set(i, h);
-  return h;
+  if (saved) byVersion.set(i.id, { at: i.updatedAt, text });
+  else byObject.set(i, text);
+  return text;
 }
 
 export function filterItems(items: Item[], f: ItemFilter): Item[] {
@@ -65,4 +73,20 @@ export function typeCounts(items: Item[]): [ItemType, number][] {
   const m = new Map<ItemType, number>();
   for (const i of items) m.set(i.type, (m.get(i.type) ?? 0) + 1);
   return [...m.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+/** Cards the library grid renders straight away; the rest follow in idle time. */
+export const FIRST_CARDS = 30;
+
+/**
+ * How many of `next` the grid should render now, given the ids of the cards it already shows: as many as
+ * possible while mounting at most `step` new ones (but always the first `first`). An edited save keeps every
+ * card; a new filter or search starts again from the top and fills in from there.
+ */
+export function cardsToRender(next: readonly Pick<Item, 'id'>[], shown: ReadonlySet<string>, first = FIRST_CARDS, step = first): number {
+  let fresh = 0;
+  for (let n = 0; n < next.length; n++) {
+    if (!shown.has(next[n].id) && ++fresh > step && n >= first) return n;
+  }
+  return next.length;
 }

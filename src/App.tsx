@@ -10,6 +10,7 @@ import { onLaunchFiles } from './lib/receive';
 import { navigate, parseRoute, usePath, type Route } from './lib/router';
 import { useSettings } from './lib/settings';
 import { parseShareInput } from './lib/share';
+import { startWarmup } from './lib/warmup';
 import { CollectionScreen } from './screens/CollectionScreen';
 import { CollectionsScreen } from './screens/CollectionsScreen';
 import { HomeScreen } from './screens/HomeScreen';
@@ -25,13 +26,16 @@ const MapScreen = lazy(() => import('./screens/MapScreen').then((m) => ({ defaul
 interface SaveRequest {
   initial?: SharedInput;
   collectionId?: string;
+  /** An unsaved draft to bring back, by id. */
+  draft?: string;
 }
 
 /**
- * Content handed over by the OS share sheet (Web Share Target) arrives as query params.
+ * Content handed over by the OS share sheet (Web Share Target) arrives as query params, and so does a draft
+ * brought back after reloading Magpie to get its storage working (with its id and collection).
  * A friend's Magpie link opens the import screen instead of the save sheet.
  */
-function takeSharedInput(): SharedInput | undefined {
+function takeSharedInput(): SaveRequest | undefined {
   const params = new URLSearchParams(window.location.search);
   const input = { title: params.get('title'), text: params.get('text'), url: params.get('url') };
   if (!input.title && !input.text && !input.url) return undefined;
@@ -42,7 +46,9 @@ function takeSharedInput(): SharedInput | undefined {
     navigate(`/import/${payload}`, { replace: true });
     return undefined;
   }
-  return input;
+  const draft = params.get('draft') ?? undefined;
+  const collectionId = params.get('collection') ?? undefined;
+  return { initial: input, ...(draft && { draft }), ...(collectionId && { collectionId }) };
 }
 
 // Read once at startup (not inside a component, which may render twice).
@@ -77,7 +83,7 @@ export function App() {
   useTheme();
   const path = usePath();
   const route = parseRoute(path);
-  const [save, setSave] = useState<SaveRequest | null>(sharedAtLaunch ? { initial: sharedAtLaunch } : null);
+  const [save, setSave] = useState<SaveRequest | null>(sharedAtLaunch ?? null);
 
   // "#/new" (home-screen shortcut) opens the save sheet.
   useEffect(() => {
@@ -86,6 +92,10 @@ export function App() {
       setSave({});
     }
   }, [route.name]);
+
+  // Get the text analysis ready (regexes, place tables) in idle time once the first screen is up, so the first
+  // paste or share doesn't freeze the phone. The save sheet hurries it along when it has text to analyse.
+  useEffect(() => startWarmup(), []);
 
   // Share files the installed app was opened with (File Handling API).
   useEffect(() => {
@@ -158,7 +168,13 @@ export function App() {
           </ErrorBoundary>
         </main>
       </div>
-      <SaveSheet open={!!save} initial={save?.initial} collectionId={save?.collectionId} onClose={() => setSave(null)} />
+      <SaveSheet
+        open={!!save}
+        initial={save?.initial}
+        collectionId={save?.collectionId}
+        draft={save?.draft}
+        onClose={() => setSave(null)}
+      />
       <UpdatePrompt />
     </ToastProvider>
   );

@@ -1,7 +1,7 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useState } from 'react';
 import { addCollection, allTags, db, updateCollection } from '../lib/db';
 import { plural } from '../lib/format';
+import { useLiveQuery } from '../lib/live';
 import { navigate } from '../lib/router';
 import { EMPTY_RULES, hasRules, matchesRules } from '../lib/smart';
 import { COLLECTION_COLORS, ITEM_TYPES, TYPE_INFO, type Collection, type SmartRules, type StatusFilter } from '../lib/types';

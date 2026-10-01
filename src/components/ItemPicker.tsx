@@ -1,8 +1,8 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { Check, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { db, toggleItemInCollection } from '../lib/db';
 import { filterItems } from '../lib/filter';
+import { useLiveQuery } from '../lib/live';
 import { TYPE_INFO, type Collection } from '../lib/types';
 import { Sheet } from './Sheet';
 import { SourceIcon } from './SourceIcon';
