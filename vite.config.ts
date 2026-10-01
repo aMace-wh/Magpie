@@ -28,11 +28,14 @@ export default defineConfig({
         start_url: './',
         scope: './',
         display: 'standalone',
-        display_override: ['window-controls-overlay', 'standalone'],
-        orientation: 'portrait',
+        lang: 'en',
+        dir: 'ltr',
         background_color: THEME,
         theme_color: THEME,
         categories: ['productivity', 'lifestyle', 'utilities'],
+        prefer_related_applications: false,
+        // A share or a shortcut reuses the open Magpie window instead of starting another one.
+        launch_handler: { client_mode: ['navigate-existing', 'auto'] },
         icons: [
           { src: 'pwa-192.png', sizes: '192x192', type: 'image/png' },
           { src: 'pwa-512.png', sizes: '512x512', type: 'image/png' },
@@ -53,6 +56,13 @@ export default defineConfig({
         },
         // Opening a .magpie / .json share file with the installed app (desktop Chromium).
         file_handlers: [{ action: './', accept: { 'application/json': ['.magpie', '.json'] } }],
+        // Shown in the richer install dialog on Android (narrow) and desktop (wide).
+        screenshots: [
+          { src: 'screenshots/home.webp', sizes: '780x1688', type: 'image/webp', form_factor: 'narrow', label: 'Your saves, sorted and coming up' },
+          { src: 'screenshots/item.webp', sizes: '780x1688', type: 'image/webp', form_factor: 'narrow', label: 'The original post, the date and the place' },
+          { src: 'screenshots/countries.webp', sizes: '780x1688', type: 'image/webp', form_factor: 'narrow', label: 'Places grouped by country' },
+          { src: 'screenshots/desktop.webp', sizes: '1280x800', type: 'image/webp', form_factor: 'wide', label: 'Magpie on a computer' },
+        ],
         shortcuts: [
           { name: 'Save something', short_name: 'Save', url: './#/new', icons: [{ src: 'pwa-192.png', sizes: '192x192' }] },
           { name: 'Map', url: './#/map', icons: [{ src: 'pwa-192.png', sizes: '192x192' }] },

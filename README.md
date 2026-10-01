@@ -59,12 +59,42 @@ npm run icons      # regenerate PNG icons from public/favicon.svg
 Stack: React 19, TypeScript, Vite, vite-plugin-pwa (Workbox, with a custom service worker in `src/sw.ts`
 for the share target), Dexie (IndexedDB), Leaflet + OpenStreetMap, lucide icons.
 
-## Deploying
+## Deploying (making it installable)
 
-The build is static and uses relative paths and hash routing, so it runs from any sub-path. The included
-GitHub Actions workflow tests, builds and publishes `main` to GitHub Pages. Enable it under
-**Settings → Pages → Source: GitHub Actions**. Any static host with HTTPS works. HTTPS is required for
-installation and the service worker.
+The build is static and uses relative paths and hash routing, so it runs from any sub-path over HTTPS.
+HTTPS is required for installing the app and for the service worker.
+
+### GitHub Pages (included)
+
+`.github/workflows/deploy.yml` tests and builds every push and pull request. It publishes the repository's
+**default branch** to GitHub Pages. To switch it on:
+
+1. Pages needs a **public** repository on GitHub Free; private repositories need GitHub Pro, Team or
+   Enterprise. To change visibility: **Settings → General → Danger Zone → Change visibility**.
+2. Under **Settings → Pages → Build and deployment → Source**, choose **GitHub Actions**.
+3. Open **Actions → CI & deploy → Run workflow**, or push to the default branch. The app is published at
+   `https://<user>.github.io/<repo>/`; for this repo that's **https://amace-wh.github.io/Magpie/**.
+
+Runs before step 2 fail at the deploy step ("Get Pages site failed"). That's expected; run the workflow
+again after switching Pages on.
+
+### Other hosts
+
+Netlify, Cloudflare Pages and Vercel all work with private repositories on their free plans. Connect the
+repository, then use build command `npm run build` and output directory `dist`. `public/_headers` sets
+cache headers for the service worker on Netlify and Cloudflare Pages.
+
+### Installing
+
+- **Android (Chrome, Edge, Samsung Internet):** open the site and tap **Install** on the banner, or use
+  **⋮ → Install app**. Magpie then shows up in the Share menu of TikTok, Instagram, YouTube, Maps and others.
+- **iPhone / iPad (Safari):** tap **Share → Add to Home Screen**. iOS doesn't let web apps appear in the
+  Share menu, so copy a link in any app, then tap **+** in Magpie and paste it.
+- **Computer (Chrome, Edge):** click the install icon in the address bar. Magpie opens in its own window and
+  can open `.magpie.json` share files.
+
+The installed app keeps working offline and updates itself: when a new version is deployed, it shows
+"A new version of Magpie is ready" with an Update button.
 
 ## Third-party services
 

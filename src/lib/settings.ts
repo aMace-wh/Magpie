@@ -7,10 +7,12 @@ export interface Settings {
   onboarded: boolean;
   /** Shown to friends when you share ("From Sam"). */
   name: string;
+  /** The "Install Magpie" banner on the library was closed. */
+  installDismissed: boolean;
 }
 
 const KEY = 'magpie:settings';
-const DEFAULTS: Settings = { previews: true, theme: 'system', onboarded: false, name: '' };
+const DEFAULTS: Settings = { previews: true, theme: 'system', onboarded: false, name: '', installDismissed: false };
 
 let current: Settings = load();
 const listeners = new Set<() => void>();

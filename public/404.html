@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Magpie</title>
+    <script>
+      // Static hosts serve this page for unknown paths (e.g. a share that reaches ./share-target before the
+      // service worker is running). Send it to the app, keeping the shared title/text/url in the query.
+      (function () {
+        var seg = location.pathname.split('/')[1];
+        // GitHub Pages project sites live under /<repo>/; elsewhere the app is at the root.
+        var base = /\.github\.io$/.test(location.hostname) && seg ? '/' + seg + '/' : '/';
+        location.replace(base + location.search + location.hash);
+      })();
+    </script>
+  </head>
+  <body>
+    <p><a href="./">Open Magpie</a></p>
+  </body>
+</html>

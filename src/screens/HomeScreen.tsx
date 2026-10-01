@@ -2,6 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { Gift, Plus, Search, Settings, Share2, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Filters } from '../components/Filters';
+import { InstallBanner } from '../components/InstallBanner';
 import { ItemGrid } from '../components/ItemCard';
 import { OpenShareFile } from '../components/OpenShareFile';
 import { ShareSheet } from '../components/ShareSheet';
@@ -55,6 +56,8 @@ export function HomeScreen({ onAdd }: { onAdd: () => void }) {
           <Settings size={20} />
         </button>
       </header>
+
+      <InstallBanner />
 
       {items === undefined ? null : items.length === 0 ? (
         <Welcome onAdd={onAdd} />
