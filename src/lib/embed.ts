@@ -183,7 +183,8 @@ const tiktok: Parser = (_u, segs) => {
 
 const IG_CODE = /^[A-Za-z0-9_-]{5,40}$/;
 const IG_KINDS = ['p', 'reel', 'reels', 'tv'];
-const IG_RESERVED = new Set(['audio', 'explore', 'stories', 'accounts', 'direct']);
+// "/share/p/<token>" and "/share/reel/<token>" carry a share token, not the post's code, so they can't be embedded.
+const IG_RESERVED = new Set(['audio', 'explore', 'stories', 'accounts', 'direct', 'share']);
 
 const instagram: Parser = (_u, segs) => {
   // /p/CODE/, /reel/CODE/ … or the newer /<user>/p/CODE/ form.

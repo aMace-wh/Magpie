@@ -1024,6 +1024,9 @@ function keepsWords(line: string, title: string, tags: string[]): boolean {
   return true;
 }
 
+// First path segments on instagram.com that are app pages, not usernames ("/share/p/…" is a share link).
+const IG_NOT_USERS = new Set(['share', 'explore', 'stories', 'accounts', 'direct', 'reels', 'reel', 'p', 'tv', 'about', 'legal']);
+
 function handleFromUrl(url: string): string | undefined {
   try {
     const u = new URL(url);
@@ -1034,7 +1037,7 @@ function handleFromUrl(url: string): string | undefined {
     if (hostMatches(host, 'x.com') || hostMatches(host, 'twitter.com')) m = p.match(/^\/(\w{1,15})\/status\//);
     else if (hostMatches(host, 'bsky.app')) m = p.match(/^\/profile\/([\w.:-]+)\//);
     else if (hostMatches(host, 'instagram.com')) m = p.match(/^\/([\w.]{2,30})\/(?:p|reels?)\//);
-    if (m) return `@${m[1]}`;
+    if (m && !(hostMatches(host, 'instagram.com') && IG_NOT_USERS.has(m[1].toLowerCase()))) return `@${m[1]}`;
   } catch {
     /* not a URL */
   }

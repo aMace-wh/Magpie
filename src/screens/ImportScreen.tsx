@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useToast } from '../components/Toast';
 import { hostOf, safeUrl } from '../lib/classify';
 import { plural } from '../lib/format';
-import { isInAppBrowser, isIos, isStandalone } from '../lib/install';
+import { isEmbeddedBrowser, isIos, isStandalone } from '../lib/install';
 import { takeInboxFile } from '../lib/receive';
 import { navigate } from '../lib/router';
 import { useSettings } from '../lib/settings';
@@ -183,7 +183,7 @@ function resultMessage(res: ImportResult, data: SharedPayloadV2): string {
  */
 function ElsewhereNote({ link }: { link: string }) {
   const toast = useToast();
-  const [where] = useState(() => (isInAppBrowser() ? 'app' : isIos() && !isStandalone() ? 'safari' : undefined));
+  const [where] = useState(() => (isEmbeddedBrowser() ? 'app' : isIos() && !isStandalone() ? 'safari' : undefined));
   if (!where) return null;
   const copy = async () => toast((await copyText(link)) ? 'Link copied — paste it into Magpie with the + button' : "Couldn't copy the link");
   return (

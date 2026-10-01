@@ -33,6 +33,7 @@ const SHORT_HOSTS = new Set(['vm.tiktok.com', 'vt.tiktok.com', 'pin.it', 'redd.i
 const SHORT_PATHS: [host: string, path: RegExp][] = [
   ['tiktok.com', /^\/t\//],
   ['facebook.com', /^\/share\//],
+  ['instagram.com', /^\/share\//],
   ['goo.gl', /^\/maps(?:\/|$)/],
 ];
 // Where a redirect lands when the platform wants you to sign in or accept cookies first.
@@ -64,10 +65,32 @@ export function isShortLink(url: string | undefined): boolean {
   return SHORT_HOSTS.has(host) || SHORT_PATHS.some(([h, path]) => host === h && path.test(u.pathname));
 }
 
+/**
+ * A login wall's "where to go after signing in" (Instagram: /accounts/login/?next=/p/CODE/) — only a path on
+ * the same site, never another site.
+ */
+function behindWall(url: string | undefined): string | undefined {
+  const u = parse(url);
+  if (!u || !isWall(url)) return undefined;
+  for (const key of ['next', 'continue', 'redirect', 'return_to']) {
+    const v = u.searchParams.get(key);
+    if (!v) continue;
+    let dest: URL;
+    try {
+      dest = new URL(v, u.origin);
+    } catch {
+      continue;
+    }
+    const sameSite = bareHost(dest) === bareHost(u) || bareHost(dest).endsWith(`.${bareHost(u)}`);
+    if (sameSite && /^https?:$/.test(dest.protocol) && !isWall(dest.href)) return safeUrl(dest.href);
+  }
+  return undefined;
+}
+
 /** Where a short link really goes, when the preview followed it somewhere useful (not a login wall or a home page). */
 export function resolvedShortLink(url: string | undefined, finalUrl: string | undefined): string | undefined {
   if (!isShortLink(url)) return undefined;
-  const target = safeUrl(finalUrl);
+  const target = behindWall(finalUrl) ?? safeUrl(finalUrl);
   const from = parse(url);
   const to = parse(target);
   if (!target || !from || !to) return undefined;

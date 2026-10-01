@@ -33,7 +33,7 @@ import { WhenEditor } from '../components/WhenEditor';
 import { calendarEventFromItem, downloadIcs, googleCalendarUrl, icsFileName, toIcs } from '../lib/calendar';
 import { hostOf, normalizeUrl, sourceLabel } from '../lib/classify';
 import { allTags, db, deleteItem, markTodo, toggleItemInCollection, updateItem } from '../lib/db';
-import { authorOf, originalTextOf } from '../lib/embed';
+import { authorOf, embedFor, originalTextOf } from '../lib/embed';
 import { enrichItem, REFRESH_OPTIONS } from '../lib/enrich';
 import { dayLabel, timeAgo } from '../lib/format';
 import { directionsLink } from '../lib/geo';
@@ -42,7 +42,7 @@ import { showOnMap } from '../lib/mapFocus';
 import { goBack, navigate } from '../lib/router';
 import { useSettings } from '../lib/settings';
 import { matchesRules } from '../lib/smart';
-import { ITEM_TYPES, TYPE_INFO, type ItemType } from '../lib/types';
+import { ITEM_TYPES, TYPE_INFO, type Item, type ItemType } from '../lib/types';
 import { findWhen, formatWhen, relativeWhen } from '../lib/when';
 
 export function ItemScreen({ id }: { id: string }) {
@@ -202,6 +202,7 @@ export function ItemScreen({ id }: { id: string }) {
       )}
 
       <OriginalPreview item={item} />
+      <WalledNote item={item} />
 
       <h2 className="section-title">When</h2>
       {calEvent ? (
@@ -323,5 +324,25 @@ export function ItemScreen({ id }: { id: string }) {
       />
       <ShareSheet open={sharing} onClose={() => setSharing(false)} target={{ kind: 'item', item }} />
     </div>
+  );
+}
+
+// Platforms that show preview services a login page instead of the post.
+const WALLED: Record<string, string> = { instagram: 'Instagram', facebook: 'Facebook', threads: 'Threads' };
+
+/** Says why a save from Instagram & co. came in bare, and what to do about it. */
+function WalledNote({ item }: { item: Item }) {
+  const platform = item.source ? WALLED[item.source] : undefined;
+  if (!platform) return null;
+  // Anything beyond the link itself: a caption, a picture or a description from the page.
+  const caption = (item.sharedText ?? '').replace(/https?:\/\/\S+/g, '').trim();
+  if (item.image || item.description || caption || item.note) return null;
+  const canEmbed = !!embedFor(item.url);
+  return (
+    <p className="hint walled-note">
+      {platform} doesn't let other apps read its posts, so Magpie couldn't get the picture, caption or location.{' '}
+      {canEmbed ? 'Tap “Load original post” above to see it.' : `Open it in ${platform} to see it.`} To have Magpie pick up the date and
+      place, copy the caption in {platform} and paste it into Notes below. You can also add them yourself.
+    </p>
   );
 }

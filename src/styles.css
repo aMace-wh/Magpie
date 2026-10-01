@@ -1007,6 +1007,35 @@ img {
   max-width: 380px;
 }
 
+/* "Saves made here may not be kept" — Magpie opened inside another app's browser. */
+.walled-note {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.storage-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 12px 8px 12px 14px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+}
+
+.storage-warning-icon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
+.storage-warning .btn {
+  align-self: flex-start;
+  margin-top: 8px;
+}
+
 /* "Install Magpie" suggestion on the library. */
 .install-banner {
   display: flex;

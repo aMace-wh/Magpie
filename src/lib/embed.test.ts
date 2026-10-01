@@ -713,3 +713,12 @@ describe('SourceIcon', () => {
     expect(html(createElement(SourceIcon, { source: 'unknown' }))).toContain('var(--surface-3)');
   });
 });
+
+describe('Instagram share links', () => {
+  it('are not embedded: the share token is not the post code', () => {
+    expect(embedFor('https://www.instagram.com/share/p/BAAbCdEfGh')).toBeUndefined();
+    expect(embedFor('https://www.instagram.com/share/reel/BAAbCdEfGh')).toBeUndefined();
+    expect(embedFor('https://www.instagram.com/share/BAAbCdEfGh')).toBeUndefined();
+    expect(embedFor('https://www.instagram.com/p/DAbCdEfGhIj/?igsh=MWQ1')?.src).toBe('https://www.instagram.com/p/DAbCdEfGhIj/embed/captioned/');
+  });
+});

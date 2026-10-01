@@ -40,6 +40,18 @@ export function isInAppBrowser(ua = typeof navigator === 'undefined' ? '' : navi
   return /\b(?:FBAN|FBAV|FB_IAB|FBIOS|Instagram|Line\/|MicroMessenger|Snapchat|musical_ly|BytedanceWebview|TikTok|Twitter|LinkedInApp|GSA\/)/i.test(ua);
 }
 
+/**
+ * Any app's built-in browser or web view (social apps, chat apps, and apps that open links inside themselves).
+ * Storage there belongs to that app and can be wiped when it closes, so saves made there may not be kept.
+ */
+export function isEmbeddedBrowser(ua = typeof navigator === 'undefined' ? '' : navigator.userAgent): boolean {
+  if (isInAppBrowser(ua)) return true;
+  // Android System WebView marks itself with "; wv)".
+  if (/; wv\)/.test(ua)) return true;
+  // On iOS, Safari, Chrome and Firefox all carry "Safari/"; app web views don't. Home Screen apps don't either.
+  return /iPhone|iPad|iPod/.test(ua) && !/Safari\//.test(ua) && typeof window !== 'undefined' && !isStandalone();
+}
+
 export function isIos(): boolean {
   return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }

@@ -368,3 +368,20 @@ describe('enrichItem: refresh preview', () => {
     expect(await enrichItem(item.id, REFRESH_OPTIONS)).toBe(false);
   });
 });
+
+describe('Instagram share links', () => {
+  it('are short links, resolved even through the login wall', () => {
+    const share = 'https://www.instagram.com/share/p/BAAbCdEfGh';
+    expect(isShortLink(share)).toBe(true);
+    expect(isShortLink('https://www.instagram.com/p/DAbCdEfGhIj/')).toBe(false);
+    expect(resolvedShortLink(share, 'https://www.instagram.com/p/DAbCdEfGhIj/?igsh=x')).toBe('https://www.instagram.com/p/DAbCdEfGhIj/?igsh=x');
+    expect(resolvedShortLink(share, 'https://www.instagram.com/accounts/login/?next=%2Fp%2FDAbCdEfGhIj%2F')).toBe('https://www.instagram.com/p/DAbCdEfGhIj/');
+  });
+
+  it('never follows a login wall to another site', () => {
+    const share = 'https://www.instagram.com/share/p/BAAbCdEfGh';
+    expect(resolvedShortLink(share, 'https://www.instagram.com/accounts/login/?next=https%3A%2F%2Fevil.example%2Fp%2Fx')).toBeUndefined();
+    expect(resolvedShortLink(share, 'https://www.instagram.com/accounts/login/?next=%2F%2Fevil.example%2F')).toBeUndefined();
+    expect(resolvedShortLink(share, 'https://www.instagram.com/accounts/login/')).toBeUndefined();
+  });
+});

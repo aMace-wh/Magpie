@@ -735,3 +735,13 @@ describe('handedText', () => {
     expect(handedText('see https://a.example/ now', ['https://a.example/', 'see https://a.example/ now'])).toBe('see https://a.example/ now');
   });
 });
+
+describe('Instagram share links', () => {
+  it('does not take "share" for a username', () => {
+    const c = classify({ text: 'https://www.instagram.com/share/p/BAAbCdEfGh' });
+    expect(c.source).toBe('instagram');
+    expect(c.title).toBe('Instagram post');
+    expect(classify({ text: 'https://www.instagram.com/share/reel/BAAbCdEfGh' }).title).toBe('Instagram reel');
+    expect(classify({ text: 'https://www.instagram.com/chef.anna/p/DAbCdEfGhIj/' }).title).toBe('Instagram post by @chef.anna');
+  });
+});

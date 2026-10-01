@@ -3,6 +3,7 @@ import { Gift, Plus, Search, Settings, Share2, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Filters } from '../components/Filters';
 import { InstallBanner } from '../components/InstallBanner';
+import { StorageWarning } from '../components/StorageWarning';
 import { ItemGrid } from '../components/ItemCard';
 import { OpenShareFile } from '../components/OpenShareFile';
 import { ShareSheet } from '../components/ShareSheet';
@@ -57,6 +58,7 @@ export function HomeScreen({ onAdd }: { onAdd: () => void }) {
         </button>
       </header>
 
+      <StorageWarning />
       <InstallBanner />
 
       {items === undefined ? null : items.length === 0 ? (
