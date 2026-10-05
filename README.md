@@ -16,6 +16,8 @@ Inspired by save-for-later apps like Albo (formerly Sortd). All code here is ori
   article, book, music, note), which platform it came from, a clean title (no "Instagram · Log in" noise) and
   starter tags. For example, a TikTok pasta video is filed as a *recipe* and tagged `#pasta #quick`. The save
   sheet shows why it picked that kind and lets you switch with one tap. No account and no AI service needed.
+  Instagram and other social posts are titled from their caption (in English, Chinese, Japanese or Korean), not
+  the account's name, and saves from before that are tidied up once in the background, leaving what you set alone.
 - **See the original.** Every save keeps exactly what was shared. Cards show a line of the original caption,
   and a save's page shows the original post, video or text, with a tap-to-load player for YouTube, TikTok,
   Instagram, X, Spotify and more, so you always recognise what you saved.
@@ -102,9 +104,9 @@ These are all optional. The app works fully offline without them.
 
 | What | Service | When |
 | --- | --- | --- |
-| Link previews | [noembed.com](https://noembed.com), [microlink.io](https://microlink.io) | After saving a link (can be disabled) |
+| Link previews | [noembed.com](https://noembed.com), [microlink.io](https://microlink.io) | After saving a link, and again later for a few saves a day whose preview or picture didn't come (can be disabled) |
 | Place details | OpenStreetMap Nominatim (reverse geocoding) | Filling in the city and country of a place you pin; only its coordinates are sent. Background lookups for saves from map links and older saves stop when link previews are off |
-| Place search | OpenStreetMap Nominatim | When you search for a location |
+| Place search | OpenStreetMap Nominatim | When you search for a location, and in the background for the place a save's caption names (only that name is sent; stops when link previews are off) |
 | Map tiles | OpenStreetMap | When viewing a map |
 | Original post players | YouTube (youtube-nocookie.com), Vimeo, TikTok, Instagram, X, Threads, Spotify, Apple Music, SoundCloud, Reddit, Pinterest, Facebook, Dailymotion, Loom, Twitch | Only when you tap to load the original post or video on a save (while link previews are on, a YouTube save shows its thumbnail from i.ytimg.com before that) |
 | Sharing | The chat app you pick (WhatsApp, Telegram, …) | Only when you share; the saves travel inside the link or file, never through a Magpie server |

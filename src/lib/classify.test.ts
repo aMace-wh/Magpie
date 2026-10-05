@@ -6,6 +6,7 @@ import {
   extractUrl,
   handedText,
   hashtags,
+  isTrackingParam,
   itemFieldsFrom,
   normalizeTag,
   normalizeUrl,
@@ -38,6 +39,30 @@ describe('stripTracking', () => {
     expect(stripTracking('https://Example.com/a?b=1&c=%20')).toBe('https://Example.com/a?b=1&c=%20');
     expect(stripTracking('not a url ?si=1')).toBe('not a url ?si=1');
     expect(stripTracking('geo:1,2?si=3')).toBe('geo:1,2?si=3');
+  });
+
+  it('drops Instagram share tokens, keeping only which photo of a carousel', () => {
+    expect(stripTracking('https://www.instagram.com/reel/AbC123/?stkn=Zm9vYmFy')).toBe('https://www.instagram.com/reel/AbC123/');
+    expect(stripTracking('https://www.instagram.com/p/AbC123/?img_index=3&stkn=Zm9v&utm_source=ig_web_copy_link')).toBe(
+      'https://www.instagram.com/p/AbC123/?img_index=3',
+    );
+    // Any other parameter on a post or reel is a per-share token too, even ones nobody has named yet.
+    expect(stripTracking('https://instagram.com/someone/reel/AbC123/?abc=1&igsh=x')).toBe('https://instagram.com/someone/reel/AbC123/');
+    expect(stripTracking('https://www.instagram.com/tv/AbC123?xyz=9')).toBe('https://www.instagram.com/tv/AbC123');
+    // Nothing to strip: exactly as it was.
+    expect(stripTracking('https://www.instagram.com/p/AbC123/?img_index=2')).toBe('https://www.instagram.com/p/AbC123/?img_index=2');
+    // Profiles and other sites keep their parameters (only known tracking goes).
+    expect(stripTracking('https://www.instagram.com/someone/?hl=en')).toBe('https://www.instagram.com/someone/?hl=en');
+    expect(stripTracking('https://shop.example/p/AbC123/?abc=1&stkn=2')).toBe('https://shop.example/p/AbC123/?abc=1');
+  });
+
+  it('isTrackingParam matches what stripTracking drops', () => {
+    const post = new URL('https://www.instagram.com/p/AbC123/');
+    expect(isTrackingParam(post, 'stkn')).toBe(true);
+    expect(isTrackingParam(post, 'anything')).toBe(true);
+    expect(isTrackingParam(post, 'img_index')).toBe(false);
+    expect(isTrackingParam(new URL('https://example.com/p/AbC123/'), 'anything')).toBe(false);
+    expect(isTrackingParam(new URL('https://example.com/'), 'utm_source')).toBe(true);
   });
 
   it('cleans every link in a text, leaving trailing punctuation alone', () => {
@@ -743,5 +768,97 @@ describe('Instagram share links', () => {
     expect(c.title).toBe('Instagram post');
     expect(classify({ text: 'https://www.instagram.com/share/reel/BAAbCdEfGh' }).title).toBe('Instagram reel');
     expect(classify({ text: 'https://www.instagram.com/chef.anna/p/DAbCdEfGhIj/' }).title).toBe('Instagram post by @chef.anna');
+  });
+});
+
+describe('Chinese, Japanese and Korean captions', () => {
+  const REEL = 'https://www.instagram.com/reel/AbC123/';
+  const POST = 'https://www.instagram.com/p/AbC123/';
+  const kind = (text: string, url: string | undefined = REEL) => classify({ text, url });
+
+  it('re-files reels from Chinese travel words, confidently enough to apply later', () => {
+    const r = kind('假日好去處 海邊看日出打卡 📍某某海灘');
+    expect(r.type).toBe('place');
+    expect(r.confidence).not.toBe('low');
+    expect(r.tags).toEqual(expect.arrayContaining(['beach', 'outdoors']));
+    expect(r.reasons[0]).toMatch(/^mentions 好去處/);
+    // Simplified spellings count the same.
+    expect(kind('假日好去处 海边看日出 打卡').type).toBe('place');
+    expect(kind('东京自由行 第三日行程 浅草寺').type).toBe('place');
+    // A post (not a reel) needs less.
+    expect(kind('旅遊必去景點', POST).type).toBe('place');
+  });
+
+  it('knows food spots, stays, shrines and travel destinations', () => {
+    expect(kind('銅鑼灣隱世咖啡店 必試').tags).toContain('coffee');
+    expect(kind('海景酒店 住一晚 度假').tags).toContain('stay');
+    expect(kind('京都散步 參拜神社 📍某某神社').type).toBe('place');
+    expect(kind('首爾 맛집 카페 추천').type).toBe('place');
+    expect(kind('東京のおすすめカフェ 観光').type).toBe('place');
+  });
+
+  it('spots recipes, workouts, products, books and events', () => {
+    expect(kind('【食譜】氣炸鍋雞翼 做法超簡單 材料：雞翼 豉油').type).toBe('recipe');
+    expect(kind('簡単レシピ 作り方 材料').type).toBe('recipe');
+    expect(kind('在家十分鐘瘦腿運動 跟住做').type).toBe('workout');
+    expect(kind('皮拉提斯入門 改善姿勢').tags).toContain('pilates');
+    expect(kind('全新相機開箱 價格 $1,299 購買連結喺bio').type).toBe('product');
+    expect(kind('書單｜今年讀過最好的5本小說').type).toBe('book');
+    expect(kind('快閃店 日期：3/12-28/12 地址：某商場地下').type).toBe('event');
+    expect(kind('演唱會門票 10月25日 公開發售').reasons[0]).toBe('has a date: 10月25日');
+  });
+
+  it('keeps generic posts generic', () => {
+    for (const text of ['炒股心得：今日大市回落', '運動員專訪：備戰比賽的日子', '今日天氣：多雲，有驟雨', '我哋公司嘅品牌故事', '記低先，遲啲睇']) {
+      expect(kind(text).type).toBe('video');
+    }
+    expect(classify({ text: '記得買牛奶同雞蛋' }).type).toBe('note');
+    // Music and articles never re-file a video, and longer words win over the short ones inside them.
+    expect(kind('節奏訓練 自彈自唱 鋼琴').type).toBe('video');
+  });
+
+  it('needs a date or a way to book before a reel becomes an event, and recaps stay videos', () => {
+    expect(kind('展覽 好正').type).toBe('video');
+    expect(kind('沉浸式劇場 早鳥門票 連結喺bio').type).toBe('event');
+    expect(kind('展覽 回顧 精華片段 9月1日').type).toBe('video');
+  });
+
+  it('reads English words that touch Chinese text', () => {
+    const r = kind('去cafe打卡 brunch好正');
+    expect(r.type).toBe('place');
+    expect(r.reasons[0]).toMatch(/cafe/);
+  });
+
+  it('quotes CJK hashtags as hashtags only when the term is the whole tag', () => {
+    expect(kind('#自由行 #行程 去咗好多景點').reasons.join(' ')).toMatch(/#自由行/);
+    expect(kind('#日本自由行 景點').reasons.join(' ')).toMatch(/mentions .*自由行/);
+  });
+
+  it('ignores when a post went up, in a raw Instagram description', () => {
+    const r = kind('12 likes, 3 comments - someone on July 2, 2026: “Jazz night at the bar, live music”.');
+    expect(r.type).toBe('video');
+    expect(r.reasons.join(' ')).not.toMatch(/date/);
+    // A date in the caption itself still counts, and so do dates that only look like that.
+    expect(kind('12 likes, 3 comments - someone on July 2, 2026: “Jazz night Sat 12 Oct, tickets in bio”.').type).toBe('event');
+    expect(classify({ text: 'Dinner on Sat 12 Oct at the wine bar' }).reasons.join(' ')).toMatch(/has a date/);
+    expect(classify({ text: 'Dinner on October 3, 2026 at the wine bar' }).reasons.join(' ')).toMatch(/has a date/);
+  });
+});
+
+describe('English travel, visiting and reading words', () => {
+  const url = 'https://www.instagram.com/reel/AbC123/';
+
+  it('reads travel planning and directions as places', () => {
+    const text = 'Road trip planning: the best routes for getting around the coast';
+    expect(classify({ text, url }).type).toBe('place');
+    const r = classify({ text: 'Directions: take exit B, then follow the trail to the summit 📍', url });
+    expect(r.type).toBe('place');
+    expect(r.confidence).not.toBe('low');
+  });
+
+  it('is sure about a book list on a reel', () => {
+    const r = classify({ text: 'Book list: three novels I loved this summer', url });
+    expect(r.type).toBe('book');
+    expect(r.confidence).not.toBe('low');
   });
 });

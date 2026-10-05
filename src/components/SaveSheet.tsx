@@ -12,7 +12,7 @@ import { navigate } from '../lib/router';
 import { useSettings } from '../lib/settings';
 import { parseShareInput } from '../lib/share';
 import { matchesRules } from '../lib/smart';
-import { TYPE_INFO, type Item, type ItemType, type Place, type When } from '../lib/types';
+import { EDITED_FIELDS, TYPE_INFO, type Item, type ItemType, type Place, type When } from '../lib/types';
 import { hurryWarmup, isWarm, subscribeWarm, textKind, whenWarm, type WarmStage } from '../lib/warmup';
 import { findWhen, formatWhen, type WhenMatch } from '../lib/when';
 import { DbStatus } from './DbStatus';
@@ -296,6 +296,12 @@ export function SaveSheet({ open, initial, collectionId, draft, onClose }: Props
     locate: place === null,
   });
 
+  /** What the user picked in the sheet themselves, which the automatic analysis then leaves alone. */
+  const userChoices = (): Pick<Item, 'edited'> => {
+    const edited = EDITED_FIELDS.filter((f) => ({ title, type, when, place, tags })[f] !== null);
+    return edited.length ? { edited } : {};
+  };
+
   const reloadNow = () => reloadWithDraft(snapshot(enrichOptions()));
 
   const saveFailed = (e: unknown, kept: UnsavedDraft) => {
@@ -355,6 +361,7 @@ export function SaveSheet({ open, initial, collectionId, draft, onClose }: Props
         tags: v.tags,
         place: v.place,
         ...(v.when && { when: v.when }),
+        ...userChoices(),
         collectionIds,
       });
       // Remembered until it's confirmed, in case the write is held up and lands later.

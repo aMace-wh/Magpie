@@ -2,8 +2,9 @@ import type { When } from './types';
 
 /**
  * Event / activity periods. Reads a date or date range out of free text
- * ("Sat 12 Oct 7:30pm", "12–14 July", "runs until 5 Jan") and validates, compares
- * and formats the floating local ISO strings stored in `When`.
+ * ("Sat 12 Oct 7:30pm", "12–14 July", "runs until 5 Jan", "10月3日 晚上7點", "日期：18/9-26/10") and validates,
+ * compares and formats the floating local ISO strings stored in `When`. A post's own posting date ("… - mei.eats
+ * on March 5, 2026:"), opening hours and offer windows are not event dates.
  *
  * Everything is local wall-clock time: "2026-10-12" is the 12th wherever you are,
  * so nothing here goes through UTC parsing.
@@ -461,6 +462,14 @@ const WD_NAMES = String.raw`mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r
 const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
+// CJK text has no spaces between words, so "日期：18/9" and "晚上7點" sit right against letters.
+const CJK = String.raw`\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff`;
+/** A letter that isn't CJK: the boundary check for numbers that may touch CJK text. */
+const NON_CJK_LETTER = String.raw`(?![${CJK}])\p{L}`;
+// Weekday characters: Chinese 日/天 = Sunday, 一…六 = Monday…Saturday; Japanese 月火水木金土 in "(土)".
+const CJK_WEEKDAYS: Record<string, number> = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 月: 1, 火: 2, 水: 3, 木: 4, 金: 5, 土: 6 };
+const cjkWeekday = (ch: string | undefined) => (ch ? (CJK_WEEKDAYS[ch] ?? -1) : undefined);
+
 const WD = String.raw`(?<![\p{L}\p{N}'])(?<wd>${WD_NAMES})(?!\p{L})\.?`;
 const MON = String.raw`(?<![\p{L}\p{N}'])(?<mon>${MON_NAMES})(?!\p{L})\.?`;
 // A day of the month that isn't part of a bigger number, a price, a time ("7pm", "7:30") or "5k".
@@ -468,7 +477,7 @@ const DAY = String.raw`(?<![\p{L}\p{N}.,:\/£$€#+'])(?<day>0?[1-9]|[12]\d|3[01
 const YEAR = String.raw`(?<year>(?:19|20|21)\d{2}|'\d{2})(?![\p{L}\p{N}]|[:.]\p{N})`;
 const YEAR_SEP = String.raw`(?:,[ \t]*|[ \t]+|-(?=\d))`;
 const THE = String.raw`(?:(?<!\p{L})the[ \t]+)?`;
-const RANGE_WORDS = String.raw`-{1,2}|~|to|until|till|til|thru|through`;
+const RANGE_WORDS = String.raw`-{1,2}|~|to|until|till|til|thru|through|至|到`;
 
 const DM_RE = new RegExp(String.raw`(?:${WD}[\s,]+)?${THE}${DAY}(?:[ \t]+of[ \t]+|-|[ \t]+)${MON}(?:${YEAR_SEP}${YEAR})?`, 'giu');
 const MD_RE = new RegExp(String.raw`(?:${WD}[\s,]+)?${MON}[ \t]+${THE}${DAY}(?:${YEAR_SEP}${YEAR})?`, 'giu');
@@ -485,6 +494,35 @@ const WEEKDAY_RE = new RegExp(
   'giu',
 );
 
+// CJK dates. "(四)", "(週四)", "(星期四)", Japanese "(土)": the weekday written after a date (fullwidth brackets are
+// normalised to ASCII first).
+const wdParen = (name: string) => String.raw`[ \t]*\((?:星期|週|周|禮拜|礼拜)?(?<${name}>[一二三四五六日天月火水木金土])(?:曜日?)?\)`;
+// "2026年10月3日", "10月3號", "10月3" (of "10月3-9日"), "10月8日(四)", Korean "10월 3일", and "2026年10月" (no day:
+// the whole month). Without 日 the day must not run on into a word ("3月10個人").
+const CJK_DATE_RE = new RegExp(
+  String.raw`(?<![\p{N}.,\/£$€#+]|\d:)(?:(?<year>(?:19|20|21)\d{2})[ \t]*[年년][ \t]*)?(?<mon>1[0-2]|0?[1-9])[ \t]*[月월](?:[ \t]*(?<day>3[01]|[12]\d|0?[1-9])(?:[ \t]*[日號号일]|(?=[-~(至到起止前]|[^\p{L}\p{N}\/.:]|$))(?:${wdParen('wdp')})?)?`,
+  'gu',
+);
+// "10月3-9日", "10月3日至9日": the last day of a range within the month.
+const CJK_SUFFIX_DAY_RE = new RegExp(
+  String.raw`^[ \t]*(?<sep>-{1,2}|~|至|到)[ \t]*(?<day>3[01]|[12]\d|0?[1-9])(?![\p{N}\/.:]|[ \t]*[月월])(?:[ \t]*[日號号일])?(?:${wdParen('wdp')})?`,
+  'u',
+);
+// "10月20日起" (from), "11月15日止" (until).
+const CJK_SUFFIX_RE = /^[ \t]*(?:(?<from>起|開始|开始)|(?<until>止|為止|为止))/u;
+// Day/month without a year: "18/9", "18/9 – 26/10", "27-29/11", "8/10(四)". Day first, as in Hong Kong, the UK and
+// Australia, unless that's impossible.
+const NUM_SHORT_RE = new RegExp(
+  String.raw`(?<![\p{N}.,\/£$€#+-]|\d:|${NON_CJK_LETTER})(?:(?<a>\d{1,2})\/(?<b>\d{1,2})(?:${wdParen('wa')})?|(?<a0>\d{1,2})(?=[ \t]*(?:-{1,2}|~|至|到)[ \t]*\d{1,2}\/))(?:[ \t]*(?:-{1,2}|~|至|到|to)[ \t]*(?<c>\d{1,2})\/(?<d>\d{1,2})(?:${wdParen('wc')})?)?(?!\p{N}|[\/.:-]\p{N}|[ \t]?%|${NON_CJK_LETTER})`,
+  'giu',
+);
+// "星期六", "週六", "禮拜日"; and what comes before it: "下星期五" (next week's), "今個星期六" (this one).
+const CJK_WEEKDAY_RE = /(?:星期|週|周|禮拜|礼拜)(?<d>[一二三四五六日天])(?![一二三四五六日天])/gu;
+const CJK_WD_QUALIFIER = /(?:下下個?|下一?個?|今個|這個?|这个?|呢個|本)[ \t]*$/u;
+// "週一至五", "星期六、日", "逢星期六", "每週六": lists and repeats, not a date.
+const CJK_WD_LIST_AFTER = /^[ \t]*(?:至|到|-{1,2}|~|、|,|，|及|和|與|与|或|\/)[ \t]*(?:星期|週|周|禮拜|礼拜)?[一二三四五六日天]/u;
+const CJK_WD_LIST_BEFORE = /(?:每個?|每逢|逢|隔|[一二三四五六日天][ \t]*(?:至|到|-{1,2}|~|、|,|，|及|和|與|与|或|\/))[ \t]*$/u;
+
 const RANGE_GAP = new RegExp(String.raw`^[ \t]*(?<sep>${RANGE_WORDS}|&|and|\/)[ \t]*$`, 'iu');
 const PREFIX_DAY_RE = new RegExp(String.raw`(?:${WD}[\s,]+)?${THE}${DAY}[ \t]*(?<sep>${RANGE_WORDS}|&|and)[ \t]*${THE}$`, 'iu');
 const SUFFIX_DAY_RE = new RegExp(String.raw`^[ \t]*(?<sep>${RANGE_WORDS}|&|and)[ \t]*(?:${WD}[\s,]+)?${THE}${DAY}(?:${YEAR_SEP}${YEAR})?`, 'iu');
@@ -492,27 +530,71 @@ const UNTIL_PREFIX =
   /(?<![\p{L}\p{N}])(?:(?:on[ \t]+now|now[ \t]+on|on|runs?|running|open|showing|available|playing|lasts?)[ \t]+)?(?:until|till|til|'til|through|thru|ends?|ending|closes?|closing|last[ \t]+day(?:[ \t]+is)?)[ \t]*[:,]?[ \t]*(?:on[ \t]+)?$/iu;
 const FROM_PREFIX = /(?<![\p{L}\p{N}])(?:from|starting|starts|begins?|beginning|opens|opening|launch(?:es|ing)?)[ \t]*[:,]?[ \t]*(?:on[ \t]+|from[ \t]+)?$/iu;
 const RANGE_FROM_PREFIX = /(?<![\p{L}\p{N}])(?:from|runs|running|open)[ \t]+$/iu;
-const POSTED_PREFIX = /(?<!\p{L})(?:posted|updated|published|uploaded|edited|on[ \t]+sale|presale|pre-sale|booking[ \t]+opens?)[^\n\d.!?]{0,14}$/iu;
+// When it was posted or goes on sale, not when it happens (also an old-style title: "Instagram post by Mei • Mar 5, 2026").
+const POSTED_PREFIX =
+  /(?<!\p{L})(?:posted|updated|published|uploaded|edited|on[ \t]+sale|presale|pre-sale|booking[ \t]+opens?|(?:instagram|facebook|threads|tiktok)[ \t]+(?:post|photo|video|reel)s?[ \t]+(?:by|from)[^\n]{0,46})[^\n\d.!?]{0,14}$/iu;
 const CLOSED_PREFIX = /(?<!\p{L})closed[ \t]+(?:on[ \t]+)?$/iu;
+// Opening hours ("Opening hours: Sat 10am–4pm", "開放時間：二至日 10:00-22:00") repeat every week.
+const HOURS_PREFIX = /(?<!\p{L})(?:opening[ \t]+(?:hours|times)|open(?:ing)?[ \t]+hours|hours[ \t]*:)[^\n]{0,30}$/iu;
+// "Dates:", "Period:", "日期：", "展期：" just before it: the event's own date.
+const LABEL_BEFORE = /(?<!\p{L})(?:dates?|period|when)[ \t]*[:|]?[ \t]*$/iu;
+// Offers and bookings: "book by 3 Oct", "early bird until…", "優惠期：…", "11月3-9期間訂購…優惠". Their dates aren't the event's.
+const PROMO_BEFORE =
+  /(?<!\p{L})(?:(?:early[ -]?bird|book(?:ing)?[ \t]+(?:by|before)|order[ \t]+(?:by|before)|(?:booking|sale|offer)[ \t]+period|discount|promo[ \t]+code|sale[ \t]+ends?|offer[ \t]+(?:ends?|valid))[^\n\p{N}]{0,12}|valid[ \t]+(?:until|till|thru|through|to)?[ \t]*)$/iu;
+
 const WD_LIST_AFTER = new RegExp(String.raw`^[ \t]*(?:${RANGE_WORDS}|&|and|,|\/)[ \t]*(?:${WD_NAMES})(?!\p{L})`, 'iu');
 const WD_LIST_BEFORE = new RegExp(String.raw`(?<![\p{L}\p{N}])(?:${WD_NAMES})\.?[ \t]*(?:${RANGE_WORDS}|&|and|,|\/)[ \t]*$`, 'iu');
 const BARE_AT_RE = /^[ \t]+(?:at|from|@)[ \t]*(\d{1,2})(?::([0-5]\d))?(?![\p{N}:.]|[ \t]?[ap]\.?m(?!\p{L}))/iu;
 
-// Times: "7pm", "7:30 p.m.", "19:30", "noon".
-const TIME_TOKEN = String.raw`(?:(\d{1,2})(?:[:.]([0-5]\d))?[ \t]?([ap])\.?m\.?(?!\p{L})|([01]?\d|2[0-3]):([0-5]\d)(?!\p{N}|[:.]\p{N})|(noon|midday)(?!\p{L}))`;
-const TIME_RE = new RegExp(String.raw`(?<![\p{L}\p{N}.,:\/£$€#+])${TIME_TOKEN}`, 'giu');
+// The same for CJK text, only tried when there is some: "(即日起)至", "直至", "由", "發佈", "營業時間", "日期："…
+const CJK_CHAR = new RegExp(`[${CJK}]`, 'u');
+const CJK_UNTIL_PREFIX = /(?:[由從从自]?(?:即日|今日|今天|現在|现在)起?)?[ \t]*(?:直至|直到|至|到)[ \t]*$/u;
+const CJK_FROM_PREFIX = /[由從从自][ \t]*$/u;
+const CJK_POSTED_PREFIX = /(?:發佈|發布|发布|發表|发表|更新|上載|上傳|上传|刊登)[^\n\d.!?]{0,14}$/u;
+const CJK_HOURS_PREFIX = /(?:開放時間|开放时间|營業時間|营业时间|辦公時間|办公时间|服務時間|服务时间)[^\n]{0,30}$/u;
+// Not "優惠日期", "截止日期", "發佈日期"…
+const CJK_LABEL_BEFORE =
+  /(?<!優惠|优惠|訂購|订购|發佈|發布|发布|更新|截止|報名|报名|出貨|出货|送貨|送货|有效|到期|開售|开售|預售|预售)(?:日期|展期|演期|檔期|档期)[ \t]*[:|]?[ \t]*$/u;
+const CJK_PROMO_BEFORE = /(?:優惠|优惠|早鳥|早鸟|預售|预售|預購|预购|訂購|订购|訂房|订房|搶購|抢购|開售|开售|折扣|特價|特价|截止)[^\n\p{N}]{0,12}$/u;
+// "…期間訂購", "…前報名", "…開售" right after it.
+const CJK_PROMO_AFTER =
+  /^[ \t]*(?:(?:期間|期间|前|之前|或之前|以前|內|内|止|為止|为止)[ \t]*(?:購買|购买|購票|购票|預購|预购|下單|下单|入手|報名|报名)|(?:期間|期间|前|之前|以前)?[ \t]*(?:訂購|订购|訂房|订房|預訂|预订|優惠|优惠|早鳥|早鸟|特價|特价|有折|折扣|半價|半价|買一送一|买一送一|開售|开售|發售|发售|開賣|开卖))/u;
+
+// Times: "7pm", "7:30 p.m.", "19:30", "noon", and CJK "晚上7點", "下午3時半", "19時30分", "晚上7:30" (not "3小時", "3時間").
+const CJK_PERIOD = '上午|早上|朝早|清晨|凌晨|半夜|深夜|中午|下午|晏晝|傍晚|晚上|夜晚|晚';
+const PM_PERIOD = /^(?:下午|晏晝|傍晚|晚上|夜晚|晚)$/u;
+const TIME_TOKEN = String.raw`(?:(\d{1,2})(?:[:.]([0-5]\d))?[ \t]?([ap])\.?m\.?(?!${NON_CJK_LETTER})|([01]?\d|2[0-3]):([0-5]\d)(?!\p{N}|[:.]\p{N})|(noon|midday)(?!${NON_CJK_LETTER})|(?:(${CJK_PERIOD})[ \t]*)?(\d{1,2})(?:[點点時时](?![間间辰代期候])(?:[ \t]*(半|[0-5]?\d)(?!\p{N})[ \t]*分?)?|:([0-5]\d)(?!\p{N})))`;
+// Text without CJK uses the plain version: the same first six groups, and much quicker to run.
+const TIME_RE = /(?<![\p{L}\p{N}.,:/£$€#+])(?:(\d{1,2})(?:[:.]([0-5]\d))?[ \t]?([ap])\.?m\.?(?!\p{L})|([01]?\d|2[0-3]):([0-5]\d)(?!\p{N}|[:.]\p{N})|(noon|midday)(?!\p{L}))/giu;
+// The lookahead names the first characters up front: without it the CJK part makes V8 test the lookbehind everywhere.
+const TIME_FIRST = String.raw`[\dnm${[...new Set(CJK_PERIOD.split('|').map((p) => p[0]))].join('')}]`;
+const CJK_TIME_RE = new RegExp(String.raw`(?=${TIME_FIRST})(?<![\p{N}.,\/£$€#+]|\d:|${NON_CJK_LETTER})${TIME_TOKEN}`, 'giu');
 const TIME_STICKY = new RegExp(TIME_TOKEN, 'iuy');
 // "Dec 31 10pm – Jan 1 2am": a start time between the two dates of a range, and the end time after it.
-const TIMED_GAP_RE = new RegExp(String.raw`^[ \t]*,?[ \t]*(?:(?:at|from|@)[ \t]*)?${TIME_TOKEN}[ \t]*(?<sep>-{1,2}|~|to|until|till|til|thru|through)[ \t]*$`, 'iu');
+const TIMED_GAP_RE = new RegExp(String.raw`^[ \t]*,?[ \t]*(?:(?:at|from|@)[ \t]*)?${TIME_TOKEN}[ \t]*(?<sep>${RANGE_WORDS})[ \t]*$`, 'iu');
 const TIME_AFTER_RE = new RegExp(String.raw`^[ \t]*,?[ \t]*(?:(?:at|@)[ \t]*)?${TIME_TOKEN}`, 'iu');
-const TIME_RANGE_SEP = /^[ \t]*(?:-{1,2}|~|to|till|til|until|'til)[ \t]*/iu;
+const TIME_RANGE_SEP = /^[ \t]*(?:-{1,2}|~|to|till|til|until|'til|至|到)[ \t]*/iu;
 const TIME_OPEN_END = /^(?:late|close|midnight|finish)(?!\p{L})/iu;
 const BARE_START_RE = /(?<![\p{L}\p{N}.,:/£$€#+])(\d{1,2})(?::([0-5]\d))?[ \t]*(?:-{1,2}|~|to|till|until)[ \t]*$/iu;
+const CJK_TIME_WORDS = '(?:入場|入场|開場|开场|開演|开演|開始|开始|演出)(?:時間|时间)?|時間|时间';
 const TIME_KEYWORD_BEFORE =
   /(?<!\p{L})(?:doors|gates|starts?|starting|start[ \t]+time|kick[- ]?off|showtime|show[ \t]+starts?)(?:[ \t]+open)?[^\p{L}\p{N}]{0,4}(?:(?:at|from)[^\p{L}\p{N}]{0,3})?$/iu;
-const TIME_GAP_AFTER =
-  /^[^\p{L}\p{N}]*(?:(?:at|from|doors|gates|starts?|starting|start[ \t]+time|kick[- ]?off|showtime|show|time|opens?|live)(?:[ \t]+open)?(?:[^\p{L}\p{N}]+(?:at|from))?[^\p{L}\p{N}]*)?$/iu;
+const CJK_TIME_KEYWORD_BEFORE = /(?:入場|入场|開場|开场|開演|开演|開始|开始|演出)(?:時間|时间)?[^\p{L}\p{N}]{0,4}$/u;
+const TIME_GAP_AFTER = new RegExp(
+  String.raw`^[^\p{L}\p{N}]*(?:(?:at|from|doors|gates|starts?|starting|start[ \t]+time|kick[- ]?off|showtime|show|time|opens?|live)(?:[ \t]+open)?(?:[^\p{L}\p{N}]+(?:at|from))?[^\p{L}\p{N}]*|(?:${CJK_TIME_WORDS}|[由從从於于])[^\p{L}\p{N}]*)?$`,
+  'iu',
+);
 const TIME_GAP_BEFORE = /^[^\p{L}\p{N}]*(?:on|this)?[^\p{L}\p{N}]*$/iu;
+
+// The wrapper Instagram puts around a caption: "1,234 likes, 56 comments - mei.eats on
+// March 5, 2026: “…”", "mei.eats on March 5, 2026", "1,234 個讚、56 則留言 - mei.eats 於 2026年3月5日:「…」".
+// Its date is when it was posted, never the event's. Tried at the start of each line (sticky).
+const COUNT = String.raw`\d[\d.,]*[ \t]*(?:[KMB萬万千]\+?)?[ \t]*(?:likes?|comments?|reactions?|shares?|views?|plays?|個讚|个赞|讚好?|赞|則留言|條留言|条留言|則回應|條評論|条评论|留言|评论|評論|回應|回应)(?!\p{L})|(?:いいね[！!]?|コメント|좋아요|댓글)[ \t]*\d[\d.,]*[ \t]*(?:件|개)?`;
+const PUB_DATE = String.raw`(?:${MON_NAMES})\.?[ \t]+\d{1,2}(?:st|nd|rd|th)?,?[ \t]+\d{4}|\d{1,2}[ \t]+(?:${MON_NAMES})\.?,?[ \t]+\d{4}|\d{4}[ \t]*[年년][ \t]*\d{1,2}[ \t]*[月월][ \t]*\d{1,2}[ \t]*[日일]?|\d{4}-\d{1,2}-\d{1,2}`;
+const PUBLISHED_RE = new RegExp(
+  String.raw`[ \t]*(?:(?<counts>(?:${COUNT})(?:[ \t]*[,，、·][ \t]*(?:${COUNT}))*)[ \t]*-[ \t]*)?(?<handle>[\w.]{1,30})[ \t]*(?<by>on|於|于|님,?|-|\()?[ \t]*(?:${PUB_DATE})(?:[ \t]*(?:at|於|于)?[ \t]*\d{1,2}:\d{2}(?:[ \t]*[ap]\.?m\.?)?)?\)?[ \t]*(?<quote>:[ \t]*["“”「『])?:?`,
+  'iuy',
+);
 
 const MAX_TEXT = 20_000;
 
@@ -525,7 +607,10 @@ export function warmRegExps(): RegExp[] {
     DM_RE, MD_RE, ISO_TEXT_RE, NUM_RE, WD_NUM_RE, MONTH_YEAR_RE, RELATIVE_RE, WEEKDAY_RE, TIME_RE, TIME_STICKY,
     RANGE_GAP, PREFIX_DAY_RE, SUFFIX_DAY_RE, UNTIL_PREFIX, FROM_PREFIX, RANGE_FROM_PREFIX, POSTED_PREFIX, CLOSED_PREFIX,
     WD_LIST_AFTER, WD_LIST_BEFORE, BARE_AT_RE, TIMED_GAP_RE, TIME_AFTER_RE, TIME_RANGE_SEP, TIME_OPEN_END, BARE_START_RE,
-    TIME_KEYWORD_BEFORE, TIME_GAP_AFTER, TIME_GAP_BEFORE, WHEN_RE,
+    TIME_KEYWORD_BEFORE, TIME_GAP_AFTER, TIME_GAP_BEFORE, WHEN_RE, PUBLISHED_RE, NUM_SHORT_RE, HOURS_PREFIX, LABEL_BEFORE,
+    PROMO_BEFORE, CJK_CHAR, CJK_DATE_RE, CJK_SUFFIX_DAY_RE, CJK_SUFFIX_RE, CJK_WEEKDAY_RE, CJK_WD_QUALIFIER, CJK_WD_LIST_AFTER,
+    CJK_WD_LIST_BEFORE, CJK_TIME_RE, CJK_TIME_KEYWORD_BEFORE, CJK_UNTIL_PREFIX, CJK_FROM_PREFIX, CJK_POSTED_PREFIX,
+    CJK_HOURS_PREFIX, CJK_LABEL_BEFORE, CJK_PROMO_BEFORE, CJK_PROMO_AFTER, PM_PERIOD,
   ];
 }
 
@@ -544,6 +629,13 @@ interface RawDate extends Span {
   /** The weekday written with the date (0 = Sunday), e.g. the "Sat" in "Sat 12 Oct". */
   wd?: number;
   iso: boolean;
+  /** Written the CJK way: "10月3日". */
+  cjk?: boolean;
+}
+
+interface MonthSpan extends Span {
+  y: number;
+  m: number;
 }
 
 interface Cand extends Span {
@@ -595,13 +687,36 @@ function windowBefore(t: string, index: number, size = 80): { text: string; offs
  * Same-length clean-up so match positions still line up with the original text:
  * dashes → "-", curly apostrophes → "'", odd spaces → " ", and links blanked out.
  */
-function normalizeText(s: string): string {
-  return s
+function normalizeText(s: string, cjk: boolean): string {
+  const t = s
     .replace(/\b(?:https?:\/\/|www\.)[^\s<>"'`]+/gi, (m) => ' '.repeat(m.length))
     .replace(/[\u2010-\u2015\u2212\ufe58\ufe63\uff0d]/g, '-')
     .replace(/[\u2018\u2019\u201b\u02bc\uff07]/g, "'")
-    .replace(/[\u00a0\u2000-\u200b\u202f\u205f\u3000\ufeff]/g, ' ')
-    .replace(/\uff1a/g, ':');
+    .replace(/[\u00a0\u2000-\u200b\u202f\u205f\u3000\ufeff]/g, ' ');
+  // CJK text: fullwidth digits, brackets, slash, colon and tilde (and the wave dash) as ASCII.
+  const ascii = cjk
+    ? t.replace(/[\uff08\uff09\uff0f-\uff1a\uff5e\u301c]/g, (c) => (c === '\u301c' ? '~' : String.fromCharCode(c.charCodeAt(0) - 0xfee0)))
+    : t.replace(/\uff1a/g, ':');
+  return blankPublished(ascii);
+}
+
+/** Blanks out a post's "likes, comments - handle on <date>:" wrapper (see PUBLISHED_RE) at the start of a line, keeping positions. */
+function blankPublished(t: string): string {
+  let out = t;
+  for (let at = 0; at >= 0 && at < t.length; at = t.indexOf('\n', at) + 1 || -1) {
+    PUBLISHED_RE.lastIndex = at;
+    const m = PUBLISHED_RE.exec(t);
+    if (!m) continue;
+    const g = m.groups!;
+    const end = at + m[0].length;
+    if (!g.counts) {
+      // Without the counts, only a lower-case handle "on" a date, before a quoted caption or alone on its line.
+      const lineEnd = /^[ \t]*(?:\n|$)/.test(t.slice(end, end + 8));
+      if (!g.by || g.by === '-' || g.by === '(' || /[A-Z]/.test(g.handle!) || !(g.quote || lineEnd)) continue;
+    }
+    out = out.slice(0, at) + ' '.repeat(m[0].length) + out.slice(end);
+  }
+  return out;
 }
 
 function cleanSource(s: string): string {
@@ -612,6 +727,9 @@ function cleanSource(s: string): string {
     .replace(/(?<![ap]\.m)\.$/i, '')
     .trim();
 }
+
+/** A real day of that month in some year (29 Feb counts). */
+const dayMonthOk = (d: number, m: number) => m >= 1 && m <= 12 && d >= 1 && d <= daysInMonth(2000, m);
 
 function inferSingle(m: number, d: number, today: Ymd): Ymd | undefined {
   for (let y = today.y; y <= today.y + 8; y++) {
@@ -663,9 +781,10 @@ function resolveWeekday(target: number, q: string | undefined, today: Ymd): Ymd 
 }
 
 /** Dates written in the text, plus the spans of impossible ones ("30 Feb 2027") so nothing else reads them. */
-function collectSingles(t: string): { dates: RawDate[]; rejected: Span[] } {
+function collectSingles(t: string, cjk: boolean): { dates: RawDate[]; rejected: Span[]; months: MonthSpan[] } {
   const found: RawDate[] = [];
   const rejected: Span[] = [];
+  const months: MonthSpan[] = [];
   for (const re of [DM_RE, MD_RE]) {
     for (const m of t.matchAll(re)) {
       const g = m.groups!;
@@ -719,10 +838,27 @@ function collectSingles(t: string): { dates: RawDate[]; rejected: Span[] } {
     if (month < 1 || month > 12 || d < 1 || d > daysInMonth(2000, month)) continue;
     found.push({ index: m.index, end: m.index + m[0].length, m: month, d, named: false, monthFirst: false, wd: weekdayIndex(m.groups!.wd), iso: false });
   }
+  for (const m of cjk ? t.matchAll(CJK_DATE_RE) : []) {
+    const g = m.groups!;
+    const span = { index: m.index, end: m.index + m[0].length };
+    const month = Number(g.mon);
+    const y = g.year ? Number(g.year) : undefined;
+    if (g.day === undefined) {
+      // "2026年10月" is the whole month; a bare "10月" isn't a date.
+      if (y !== undefined) months.push({ ...span, y, m: month });
+      continue;
+    }
+    const d = Number(g.day);
+    if (d > daysInMonth(y ?? 2000, month)) {
+      rejected.push(span);
+      continue;
+    }
+    found.push({ ...span, m: month, d, y, named: true, monthFirst: true, wd: cjkWeekday(g.wdp), iso: false, cjk: true });
+  }
   found.sort((a, b) => a.index - b.index || b.end - a.end);
   const kept: RawDate[] = [];
   for (const r of found) if (!kept.length || r.index >= kept[kept.length - 1].end) kept.push(r);
-  return { dates: kept, rejected };
+  return { dates: kept, rejected, months };
 }
 
 function parseTime(m: RegExpMatchArray | RegExpExecArray): Hm | undefined {
@@ -733,12 +869,24 @@ function parseTime(m: RegExpMatchArray | RegExpExecArray): Hm | undefined {
   }
   if (m[4] !== undefined) return { h: Number(m[4]), min: Number(m[5]) };
   if (m[6]) return { h: 12, min: 0 };
+  if (m[8] !== undefined) {
+    // CJK: "晚上7點" is 19:00, "7點半" 7:30; "7:30" alone is read above, so a colon here needs "晚上" and the like.
+    const period = m[7];
+    if (m[10] !== undefined && !period) return undefined;
+    let h = Number(m[8]);
+    const min = m[9] === '半' ? 30 : Number(m[9] ?? m[10] ?? 0);
+    if (h > 23 || min > 59) return undefined;
+    if (period && PM_PERIOD.test(period)) h += h < 12 ? 12 : 0;
+    else if (period === '中午') h += h < 6 ? 12 : 0;
+    else if (period && h === 12) h = 0;
+    return { h, min };
+  }
   return undefined;
 }
 
-function findTimes(t: string, taken: Span[]): TimeHit[] {
+function findTimes(t: string, taken: Span[], cjk: boolean): TimeHit[] {
   const hits: TimeHit[] = [];
-  for (const m of t.matchAll(TIME_RE)) {
+  for (const m of t.matchAll(cjk ? CJK_TIME_RE : TIME_RE)) {
     let start = parseTime(m);
     if (!start) continue;
     let index = m.index;
@@ -769,8 +917,10 @@ function findTimes(t: string, taken: Span[]): TimeHit[] {
         const at = end + sep[0].length;
         TIME_STICKY.lastIndex = at;
         const n = TIME_STICKY.exec(t);
-        const f = n ? parseTime(n) : undefined;
+        let f = n ? parseTime(n) : undefined;
         if (n && f) {
+          // "晚上7點至10點": the end is in the same half of the day.
+          if (m[7] && n[8] !== undefined && !n[7] && start.h >= 12 && f.h < 12) f = { h: f.h + 12, min: f.min };
           finish = f;
           end = at + n[0].length;
         } else {
@@ -779,7 +929,9 @@ function findTimes(t: string, taken: Span[]): TimeHit[] {
         }
       }
     }
-    hits.push({ index, end, start, finish, keyword: TIME_KEYWORD_BEFORE.test(windowBefore(t, index).text) });
+    const before = windowBefore(t, index).text;
+    const keyword = TIME_KEYWORD_BEFORE.test(before) || (cjk && CJK_TIME_KEYWORD_BEFORE.test(before.slice(-12)));
+    hits.push({ index, end, start, finish, keyword });
   }
   // The second half of "7pm-11pm" is also matched on its own; keep the combined hit.
   const kept: TimeHit[] = [];
@@ -804,9 +956,10 @@ export interface WhenMatch {
   index: number;
   length: number;
   /**
-   * 'high' for explicit dates ("12 Oct", "2026-10-12", "12–14 July", "until 5 Jan", "Friday 7pm");
-   * 'low' for loose ones ("today", "this Saturday") and for dates whose written weekday doesn't
-   * match ("Sat 12 Oct" in a year where that's a Monday), which are better offered than applied.
+   * 'high' for explicit dates ("12 Oct", "2026-10-12", "12–14 July", "until 5 Jan", "Friday 7pm", "10月3日",
+   * "18/9-26/10"); 'low' for loose ones ("today", "this Saturday", "至3/11": 3 Nov or 11 Mar?) and for dates
+   * whose written weekday doesn't match ("Sat 12 Oct" in a year where that's a Monday), which are better offered
+   * than applied.
    */
   confidence: 'high' | 'low';
 }
@@ -815,11 +968,17 @@ export interface WhenMatch {
 export function findWhen(text: string, now: Date = new Date()): WhenMatch | undefined {
   if (typeof text !== 'string' || !text.trim()) return undefined;
   const original = text.length > MAX_TEXT ? text.slice(0, MAX_TEXT) : text;
-  const t = normalizeText(original);
+  // The CJK patterns only run on text that has some.
+  const cjk = CJK_CHAR.test(original);
+  const t = normalizeText(original, cjk);
   const today = ymdOf(now);
+  const untilBefore = (w: string) => UNTIL_PREFIX.exec(w) ?? (cjk ? CJK_UNTIL_PREFIX.exec(w) : null);
+  const fromBefore = (w: string, re = FROM_PREFIX) => re.exec(w) ?? (cjk ? CJK_FROM_PREFIX.exec(w) : null);
+  const hoursBefore = (w: string) => HOURS_PREFIX.test(w) || (cjk && CJK_HOURS_PREFIX.test(w));
+  const labelBefore = (w: string) => LABEL_BEFORE.test(w) || (cjk && CJK_LABEL_BEFORE.test(w));
   const cands: Cand[] = [];
 
-  const { dates: singles, rejected } = collectSingles(t);
+  const { dates: singles, rejected, months: cjkMonths } = collectSingles(t, cjk);
   const taken: Span[] = [...singles, ...rejected];
   const consumed = new Set<RawDate>();
 
@@ -867,7 +1026,7 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
     i++;
   }
 
-  // "12–14 July" and "July 12–14"
+  // "12–14 July", "July 12–14", "10月3-9日"
   for (let i = 0; i < singles.length; i++) {
     const s = singles[i];
     if (consumed.has(s) || !s.named) continue;
@@ -888,7 +1047,7 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
       taken.push(span);
       consumed.add(s);
     } else {
-      const m = SUFFIX_DAY_RE.exec(t.slice(s.end, s.end + 60));
+      const m = (s.cjk ? CJK_SUFFIX_DAY_RE : SUFFIX_DAY_RE).exec(t.slice(s.end, s.end + 60));
       const next = singles[i + 1];
       if (!m || (next && s.end + m[0].length > next.index)) continue;
       const d2 = Number(m.groups!.day);
@@ -898,7 +1057,7 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
       const r = inferRange({ m: s.m, d: s.d, y: y2 === undefined ? s.y : undefined }, { ...to, y: y2 }, today);
       if (!r || !joinable(m.groups!.sep, r)) continue;
       const span = { index: s.index, end: s.end + m[0].length };
-      const doubtful = clash(s.wd, r[0]) || clash(weekdayIndex(m.groups!.wd), r[1]);
+      const doubtful = clash(s.wd, r[0]) || clash(s.cjk ? cjkWeekday(m.groups!.wdp) : weekdayIndex(m.groups!.wd), r[1]);
       cands.push({ ...span, start: r[0], endDate: r[1], allowTime: false, doubtful, score: 10 });
       taken.push(span);
       consumed.add(s);
@@ -908,11 +1067,11 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
   // Ranges may be introduced by "from" / "runs": keep it in the source phrase.
   for (const c of cands) {
     const w = windowBefore(t, c.index, 16);
-    const f = RANGE_FROM_PREFIX.exec(w.text);
+    const f = fromBefore(w.text, RANGE_FROM_PREFIX);
     if (f) c.index = w.offset + f.index;
   }
 
-  // Single dates, possibly "until 5 Jan" / "from 1 Nov".
+  // Single dates, possibly "until 5 Jan" / "from 1 Nov" / "即日起至11月15日" / "10月20日起".
   for (const s of singles) {
     if (consumed.has(s)) continue;
     const date = s.y !== undefined ? { y: s.y, m: s.m, d: s.d } : inferSingle(s.m, s.d, today);
@@ -920,33 +1079,103 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
     // Usually an old post ("Sat 12 Oct" was 2024), or a typo: offer it rather than trust it.
     const doubtful = clash(s.wd, date);
     const w = windowBefore(t, s.index);
-    const until = UNTIL_PREFIX.exec(w.text);
-    if (until) {
+    const suffix = s.cjk ? CJK_SUFFIX_RE.exec(t.slice(s.end, s.end + 8)) : null;
+    const end = suffix ? s.end + suffix[0].length : s.end;
+    const until = untilBefore(w.text);
+    if (until || suffix?.groups!.until) {
       const start = cmpYmd(date, today) < 0 ? date : today;
-      cands.push({ index: w.offset + until.index, end: s.end, start, endDate: date, allowTime: false, doubtful, score: 9 });
+      cands.push({ index: until ? w.offset + until.index : s.index, end, start, endDate: date, allowTime: false, doubtful, score: 9 });
       continue;
     }
-    const from = FROM_PREFIX.exec(w.text);
+    const from = fromBefore(w.text);
     const wdBonus = s.wd !== undefined && !doubtful ? 0.5 : 0;
     const base = s.iso ? 8 : s.named ? 8 + wdBonus + (s.y !== undefined ? 0.5 : 0) : 6.5 + wdBonus;
     cands.push({
       index: from ? w.offset + from.index : s.index,
-      end: s.end,
+      end,
       start: date,
       startTime: s.time,
       allowTime: !s.time,
       doubtful,
-      score: from ? base + 0.5 : base,
+      score: from || suffix ? base + 0.5 : base,
     });
   }
 
-  // "Nov 2026" (the whole month), "October 2026 – March 2027"
-  const months: (Span & { y: number; m: number })[] = [];
+  // Day/month without a year ("18/9 – 26/10", "日期：18/9", "至3/11", "8/10(四)"). A range counts when only one
+  // order makes sense (25 can't be a month) or after a label; a single date only after a label, "until"/"至",
+  // "起"/"止" or with its weekday. Loose ones ("至3/11": 3 Nov or 11 Mar?) are offered, not trusted.
+  for (const m of t.includes('/') ? t.matchAll(NUM_SHORT_RE) : []) {
+    const span = { index: m.index, end: m.index + m[0].length };
+    if (overlapsAny(span, taken)) continue;
+    const g = m.groups!;
+    const w = windowBefore(t, span.index);
+    const labelled = labelBefore(w.text);
+    const a = Number(g.a ?? g.a0);
+    if (g.c !== undefined) {
+      const [c, d] = [Number(g.c), Number(g.d)];
+      let range: [PartialDate, PartialDate] | undefined;
+      let settled = true;
+      if (g.b !== undefined) {
+        const b = Number(g.b);
+        const dm = dayMonthOk(a, b) && dayMonthOk(c, d);
+        const md = dayMonthOk(b, a) && dayMonthOk(d, c);
+        if (dm) [range, settled] = [[{ m: b, d: a }, { m: d, d: c }], !md];
+        else if (md) range = [{ m: a, d: b }, { m: c, d }];
+      } else if (dayMonthOk(a, d) && dayMonthOk(c, d)) {
+        // "27-28/9"; "1-2/3" could as well be a fraction.
+        [range, settled] = [[{ m: d, d: a }, { m: d, d: c }], a > 12 || c > 12];
+      }
+      if (!range) continue;
+      const [wa, wc] = [cjkWeekday(g.wa), cjkWeekday(g.wc)];
+      const misfit = (r: [Ymd, Ymd] | undefined) => !r || clash(wa, r[0]) || clash(wc, r[1]);
+      let r = inferRange(range[0], range[1], today);
+      if (!settled && (wa !== undefined || wc !== undefined)) {
+        // The weekdays settle it: day first if they fit, else month first if that fits (as in Taiwan).
+        const md = inferRange({ m: a, d: Number(g.b) }, { m: c, d }, today);
+        if (misfit(r) && !misfit(md)) r = md;
+        settled = !misfit(r);
+      }
+      if (!r || !joinable('-', r) || (!settled && !labelled)) continue;
+      const doubtful = misfit(r);
+      cands.push({ ...span, start: r[0], endDate: r[1], allowTime: false, doubtful, score: 8 });
+      taken.push(span);
+      continue;
+    }
+    const b = Number(g.b);
+    const dm = dayMonthOk(a, b);
+    const md = dayMonthOk(b, a);
+    let date = dm ? inferSingle(b, a, today) : md ? inferSingle(a, b, today) : undefined;
+    const wd = cjkWeekday(g.wa);
+    let settled = !(dm && md);
+    if (!settled && wd !== undefined && date) {
+      // "10/3(六)": the weekday settles it, as for ranges.
+      const alt = inferSingle(a, b, today);
+      if (clash(wd, date) && alt && !clash(wd, alt)) date = alt;
+      settled = !clash(wd, date);
+    }
+    if (!date) continue;
+    const doubtful = clash(wd, date);
+    const suffix = CJK_SUFFIX_RE.exec(t.slice(span.end, span.end + 8));
+    const end = suffix ? span.end + suffix[0].length : span.end;
+    const until = untilBefore(w.text);
+    if (until || suffix?.groups!.until) {
+      const start = cmpYmd(date, today) < 0 ? date : today;
+      cands.push({ index: until ? w.offset + until.index : span.index, end, start, endDate: date, allowTime: false, doubtful, score: settled ? 9 : 5 });
+    } else if (wd !== undefined || labelled || suffix) {
+      const score = wd !== undefined ? 6.5 + (doubtful ? 0 : 0.5) : labelled ? (settled ? 7.5 : 7) : settled ? 7 : 5;
+      cands.push({ ...span, end, start: date, allowTime: true, doubtful, score });
+    } else continue;
+    taken.push({ index: span.index, end });
+  }
+
+  // "Nov 2026", "2026年11月" (the whole month), "October 2026 – March 2027"
+  const months: MonthSpan[] = cjkMonths.filter((m) => !overlapsAny(m, taken));
   for (const m of t.matchAll(MONTH_YEAR_RE)) {
     const span = { index: m.index, end: m.index + m[0].length };
     if (overlapsAny(span, taken)) continue;
     months.push({ ...span, y: Number(m.groups!.year), m: monthIndex(m.groups!.mon) });
   }
+  if (cjkMonths.length) months.sort((a, b) => a.index - b.index);
   taken.push(...months);
   for (let i = 0; i < months.length; i++) {
     const a = months[i];
@@ -960,8 +1189,8 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
     }
     const last = { y: a.y, m: a.m, d: daysInMonth(a.y, a.m) };
     const w = windowBefore(t, a.index);
-    const until = UNTIL_PREFIX.exec(w.text);
-    const from = FROM_PREFIX.exec(w.text);
+    const until = untilBefore(w.text);
+    const from = fromBefore(w.text);
     if (until) cands.push({ index: w.offset + until.index, end: a.end, start: cmpYmd(last, today) < 0 ? first : today, endDate: last, allowTime: false, score: 7 });
     else if (from) cands.push({ index: w.offset + from.index, end: a.end, start: first, allowTime: false, score: 6.5 });
     else cands.push({ index: a.index, end: a.end, start: first, endDate: last, allowTime: false, score: 6 });
@@ -1006,9 +1235,9 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
     // Lower-case "sat", "sun", "wed", "mon" are usually just words.
     if (!q && /^(?:sat|sun|wed|mon)$/.test(g.wd)) continue;
     const w = windowBefore(t, span.index);
-    if (WD_LIST_BEFORE.test(w.text) || WD_LIST_AFTER.test(t.slice(span.end, span.end + 24)) || CLOSED_PREFIX.test(w.text)) continue;
+    if (WD_LIST_BEFORE.test(w.text) || WD_LIST_AFTER.test(t.slice(span.end, span.end + 24)) || CLOSED_PREFIX.test(w.text) || hoursBefore(w.text)) continue;
     const date = resolveWeekday(weekdayIndex(g.wd), q, today);
-    const until = UNTIL_PREFIX.exec(w.text);
+    const until = untilBefore(w.text);
     if (until) {
       cands.push({ index: w.offset + until.index, end: span.end, start: today, endDate: date, allowTime: false, score: 6.5 });
       continue;
@@ -1016,9 +1245,27 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
     cands.push({ ...span, start: date, allowTime: true, needsTime: !q && !g.pod, rollsWeekly: q !== 'next', score: q ? 5 : 4.5 });
   }
 
+  // "星期六", "下星期五", "今個週六 晚上8點" (as "Saturday", "next Friday"…)
+  for (const m of cjk ? t.matchAll(CJK_WEEKDAY_RE) : []) {
+    const qm = CJK_WD_QUALIFIER.exec(t.slice(Math.max(0, m.index - 4), m.index));
+    const q = qm?.[0].trim();
+    const span = { index: m.index - (qm ? qm[0].length : 0), end: m.index + m[0].length };
+    if (overlapsAny(span, taken)) continue;
+    const w = windowBefore(t, span.index);
+    if (CJK_WD_LIST_BEFORE.test(w.text) || CJK_WD_LIST_AFTER.test(t.slice(span.end, span.end + 12)) || hoursBefore(w.text)) continue;
+    const next = q?.startsWith('下');
+    const date = addDays(resolveWeekday(cjkWeekday(m.groups!.d)!, next ? 'next' : undefined, today), q?.startsWith('下下') ? 7 : 0);
+    const until = untilBefore(w.text);
+    if (until) {
+      cands.push({ index: w.offset + until.index, end: span.end, start: today, endDate: date, allowTime: false, score: 6.5 });
+      continue;
+    }
+    cands.push({ ...span, start: date, allowTime: true, needsTime: !q, rollsWeekly: !next, score: q ? 5 : 4.5 });
+  }
+
   if (!cands.length) return undefined;
 
-  const hits = findTimes(t, taken).filter((h) => !overlapsAny(h, taken));
+  const hits = findTimes(t, taken, cjk).filter((h) => !overlapsAny(h, taken));
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const scored: Cand[] = [];
   for (const c of cands) {
@@ -1034,8 +1281,11 @@ export function findWhen(text: string, now: Date = new Date()): WhenMatch | unde
     }
     if (c.needsTime && !c.startTime) continue;
     if (c.rollsWeekly && c.startTime && dayNum(c.start) === dayNum(today) && minutesOf(c.startTime) < nowMinutes) c.start = addDays(c.start, 7);
-    // "Posted 3 Sep", "on sale 1 Nov": a date, but not when the thing happens.
-    if (POSTED_PREFIX.test(windowBefore(t, c.index).text)) continue;
+    const before = windowBefore(t, c.index).text;
+    // "Posted 3 Sep", "on sale 1 Nov", "book by 3 Oct", "11月3-9期間訂購": a date, but not when the thing happens.
+    if (POSTED_PREFIX.test(before) || PROMO_BEFORE.test(before)) continue;
+    if (cjk && (CJK_POSTED_PREFIX.test(before) || CJK_PROMO_BEFORE.test(before) || CJK_PROMO_AFTER.test(t.slice(c.end, c.end + 16)))) continue;
+    if (labelBefore(before)) c.score += 1;
     if (cmpYmd(c.endDate ?? c.start, today) < 0) c.score -= 4;
     if (c.doubtful) c.score -= 1;
     scored.push(c);

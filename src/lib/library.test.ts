@@ -15,6 +15,21 @@ beforeEach(async () => {
   await db.collections.clear();
 });
 
+describe('updateItem', () => {
+  it('remembers what the user changed by hand, so the automatic analysis leaves it alone', async () => {
+    const item = await addItem({ type: 'video', title: 'Reel', tags: ['a'], place: { lat: 1, lng: 2 }, locatePending: true });
+    await updateItem(item.id, { title: 'Reel', type: 'video', note: 'mine' });
+    expect((await db.items.get(item.id))!.edited).toBeUndefined();
+    await updateItem(item.id, { type: 'recipe', tags: ['a', 'b'] });
+    await updateItem(item.id, { place: undefined, when: { start: '2026-10-24' } });
+    const saved = (await db.items.get(item.id))!;
+    expect(saved.edited).toEqual(['type', 'tags', 'when', 'place']);
+    expect(saved).toMatchObject({ type: 'recipe', tags: ['a', 'b'], note: 'mine', when: { start: '2026-10-24' } });
+    expect('place' in saved).toBe(false);
+    expect(saved.locatePending).toBeUndefined();
+  });
+});
+
 describe('smart collections', () => {
   const pasta = buildItem({ title: 'Pasta', type: 'recipe', tags: ['pasta', 'quick'] });
   const cafe = buildItem({ title: 'Café', type: 'place', tags: ['coffee'], status: 'done' });

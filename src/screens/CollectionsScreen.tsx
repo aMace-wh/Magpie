@@ -3,12 +3,13 @@ import { useMemo, useState, type CSSProperties } from 'react';
 import { CollectionEditor } from '../components/CollectionEditor';
 import { DbStatus, Loading } from '../components/DbStatus';
 import { OpenShareFile } from '../components/OpenShareFile';
-import { safeUrl } from '../lib/classify';
+import { ThumbImage } from '../components/Thumb';
 import { db } from '../lib/db';
 import { plural } from '../lib/format';
 import { useLiveQuery } from '../lib/live';
 import { navigate } from '../lib/router';
 import { itemsInCollection } from '../lib/smart';
+import { useThumb } from '../lib/thumbs';
 import { TYPE_INFO, type Collection, type Item } from '../lib/types';
 
 export function CollectionsScreen() {
@@ -119,12 +120,22 @@ function CollectionTile({ collection, items }: { collection: Collection; items: 
 
 /** A cover picture, or the save's emoji when it has none (or it doesn't load). */
 function MosaicCell({ item, fallback, tint }: { item?: Item; fallback: string; tint: CSSProperties }) {
-  const [failed, setFailed] = useState<string>();
-  const src = safeUrl(item?.image);
-  if (src && src !== failed) return <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(src)} />;
+  if (item) return <MosaicCover item={item} tint={tint} />;
   return (
     <div className="cell" style={tint}>
-      {item ? TYPE_INFO[item.type].emoji : fallback}
+      {fallback}
+    </div>
+  );
+}
+
+function MosaicCover({ item, tint }: { item: Item; tint: CSSProperties }) {
+  const { src, waiting } = useThumb(item);
+  if (src) return <ThumbImage id={item.id} src={src} />;
+  // Keeps its place in the grid while the copy on this device is looked up.
+  if (waiting) return <div />;
+  return (
+    <div className="cell" style={tint}>
+      {TYPE_INFO[item.type].emoji}
     </div>
   );
 }

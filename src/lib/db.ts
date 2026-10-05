@@ -2,12 +2,24 @@ import Dexie, { type EntityTable } from 'dexie';
 import { classify, itemFieldsFrom, normalizeTag, type SharedInput } from './classify';
 import { isAlreadySaved, isStorageFailure, isTimeout, monitorDb, saveWithRetry, type DbStatus } from './dbHealth';
 import { uid } from './id';
-import type { Collection, Item } from './types';
+import { EDITED_FIELDS, type Collection, type Item } from './types';
 import { findWhen } from './when';
+
+/** A small copy of a save's picture kept on this device (thumbs.ts). Never part of a backup or a share. */
+export interface ThumbRow {
+  /** The save's id: one copy per save. */
+  id: string;
+  /** The image it's a copy of (the save's `image` when it was made). */
+  src: string;
+  blob: Blob;
+  /** When it was made; the oldest go first when there are too many. */
+  at: number;
+}
 
 export const db = new Dexie('magpie') as Dexie & {
   items: EntityTable<Item, 'id'>;
   collections: EntityTable<Collection, 'id'>;
+  thumbs: EntityTable<ThumbRow, 'id'>;
 };
 
 db.version(1).stores({
@@ -19,6 +31,8 @@ db.version(2).stores({
   items: 'id, type, status, createdAt, updatedAt, doneAt, *tags, *collectionIds, when.start, place.countryCode',
   collections: 'id, createdAt, name, from.shareId',
 });
+// v3: local copies of thumbnails, since some image links (Instagram, Facebook…) stop working after a few days.
+db.version(3).stores({ thumbs: 'id, at, [id+src]' });
 
 /** How the database is doing (opening, slow, blocked, lost…), for the status banner and Diagnostics. */
 export const dbHealth = monitorDb(db, {
@@ -96,10 +110,28 @@ export async function saveShared(input: SharedInput, extra: Partial<NewItem> = {
   return addItem({ ...fields, ...(when && { when }), ...extra, tags: [...c.tags, ...(extra.tags ?? [])] });
 }
 
+/**
+ * Saves the user's own changes. A title, kind, date, place or tags they change by hand is remembered (Item.edited),
+ * so the automatic analysis leaves it as it is from then on.
+ */
 export async function updateItem(id: string, changes: Partial<Omit<Item, 'id' | 'createdAt'>>): Promise<void> {
   const patch: Partial<Item> = { ...changes, updatedAt: Date.now() };
   if (changes.tags) patch.tags = uniqueTags(changes.tags);
-  await db.items.update(id, patch);
+  if (!EDITED_FIELDS.some((k) => k in changes)) {
+    await db.items.update(id, patch);
+    return;
+  }
+  await db.items.update(id, (item) => {
+    const fields = item as unknown as Record<string, unknown>;
+    const edited = EDITED_FIELDS.filter((k) => k in patch && JSON.stringify(item[k]) !== JSON.stringify(patch[k]));
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete fields[k];
+      else fields[k] = v;
+    }
+    if (edited.length) item.edited = [...new Set([...(item.edited ?? []), ...edited])];
+    // A place set or cleared by hand: nothing left to look up.
+    if (edited.includes('place')) delete item.locatePending;
+  });
 }
 
 export async function markDone(id: string, rating?: number, review?: string): Promise<void> {
@@ -110,8 +142,33 @@ export async function markTodo(id: string): Promise<void> {
   await updateItem(id, { status: 'todo', doneAt: undefined, rating: undefined, review: undefined });
 }
 
+/** A deleted save's thumbnail is kept this long, so "Undo" brings its picture back too. */
+export const THUMB_GRACE_MS = 15000;
+
 export async function deleteItem(id: string): Promise<void> {
   await db.items.delete(id);
+  setTimeout(() => void dropThumbs([id]), THUMB_GRACE_MS);
+}
+
+type DeletedListener = (ids: string[] | 'all') => void;
+const deletedListeners = new Set<DeletedListener>();
+
+/** Called once deleted saves' thumbnails are gone too ('all' after clearAll). Returns an unsubscribe function. */
+export function onItemsDeleted(listener: DeletedListener): () => void {
+  deletedListeners.add(listener);
+  return () => deletedListeners.delete(listener);
+}
+
+/** Drops the thumbnails of saves that are still deleted. Never fails: a later tidy-up (thumbs.ts) gets any left. */
+async function dropThumbs(ids: string[]): Promise<void> {
+  try {
+    const gone = (await db.items.bulkGet(ids)).flatMap((item, i) => (item ? [] : [ids[i]]));
+    if (!gone.length) return;
+    await db.thumbs.bulkDelete(gone);
+    deletedListeners.forEach((l) => l(gone));
+  } catch {
+    /* storage trouble: left for the tidy-up */
+  }
 }
 
 export async function toggleItemInCollection(itemId: string, collectionId: string): Promise<void> {
@@ -175,8 +232,10 @@ export async function allTags(): Promise<{ tag: string; count: number }[]> {
 }
 
 export async function clearAll(): Promise<void> {
-  await db.transaction('rw', db.items, db.collections, async () => {
+  await db.transaction('rw', db.items, db.collections, db.thumbs, async () => {
     await db.items.clear();
     await db.collections.clear();
+    await db.thumbs.clear();
   });
+  deletedListeners.forEach((l) => l('all'));
 }

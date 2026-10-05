@@ -123,14 +123,16 @@ registerRoute(
   }),
 );
 
-// Thumbnails of saved links.
+// Thumbnails of saved links. The app keeps its own small copies (src/lib/thumbs.ts) where the image server allows it;
+// where it doesn't, it loads the image once so it's cached here — the only copy left once a signed link (Instagram,
+// Facebook…) expires, so kept for a year. thumbs.ts looks in this cache by name.
 registerRoute(
   ({ request, sameOrigin }) => !sameOrigin && request.destination === 'image',
   new CacheFirst({
     cacheName: 'thumbnails',
     plugins: [
       new CacheableResponsePlugin({ statuses: [0, 200] }),
-      new ExpirationPlugin({ maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 90, purgeOnQuotaError: true }),
+      new ExpirationPlugin({ maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 365, purgeOnQuotaError: true }),
     ],
   }),
 );

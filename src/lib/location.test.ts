@@ -15,6 +15,7 @@ import {
   OTHER_CITY,
   placeCity,
   placeCountryCode,
+  placeCandidates,
   placeLabel,
   resolvePlaceDetails,
   UNKNOWN_COUNTRY,
@@ -380,6 +381,119 @@ describe('guessCountry', () => {
   });
 });
 
+describe('CJK places', () => {
+  it('recognises Chinese, Japanese and Korean place names', () => {
+    expect(guess('週末去東京食拉麵')).toBe('JP');
+    expect(guess('首爾三日兩夜行程')).toBe('KR');
+    expect(guess('서울특별시 마포구 예시로 10')).toBe('KR');
+    expect(guess('경기도 수원시 예시구 예시로 5')).toBe('KR');
+    expect(guess('曼谷自由行攻略')).toBe('TH');
+    expect(guess('西環食早餐')).toBe('HK');
+    expect(guess('塔斯曼尼亞徒步')).toBe('AU');
+    expect(guess('南法薰衣草田')).toBe('FR');
+    expect(guess('广东早茶推介')).toBe('CN');
+    expect(guess('タイ旅行')).toBe('TH');
+    expect(guessCountry('酒店喺Siam隔籬', { locale: 'en' })?.code).toBe('TH');
+  });
+
+  it('prefers the most mentioned country, and the one after a pin', () => {
+    expect(guess('#意大利 #羅馬 #法國')).toBe('IT');
+    expect(guess('倫敦同東京都去過，今次去首爾')).toBe('GB'); // a tie: the first named
+    expect(guess('倫敦同東京都去過，今次去首爾 📍 서울특별시 종로구 예시로 1')).toBe('KR');
+  });
+
+  it('skips brands, origins and everyday words', () => {
+    for (const junk of [
+      '日本品牌嘅護膚品',
+      '韓國男團演唱會門票',
+      '泰國菜食譜',
+      '由台灣直送香港，買滿包郵',
+      '川貝燉雪梨',
+      '舞台中央',
+      '巴黎世家新款手袋',
+      'タイムセール',
+      'Made in Japan ceramics',
+      'Our new Korean skincare routine',
+      'New menu by @tokyo_cafe_guide',
+    ]) {
+      expect(guessCountry(junk, { demonyms: false }), junk).toBeUndefined();
+    }
+    expect(guess('香港人最愛')).toBe('HK');
+    expect(guessCountry('香港人最愛', { demonyms: false })).toBeUndefined();
+    expect(hints('Ceramics made in Japan')).toEqual([]);
+  });
+
+  it('reads CJK pins and labels', () => {
+    expect(hints('同朋友去咗間酒店（珠海）📍某某酒店 #珠海好去處')).toEqual(['某某酒店', '珠海']);
+    expect(hints('地址：沙田新城市廣場二期3樓')[0]).toBe('New Town Plaza, Sha Tin');
+    expect(hints('我喺 Central World 搵到呢間小店')).toContain('Central World');
+    expect(hints('大阪美食 📍小貼士：記得早啲去排隊')).toEqual(['大阪']);
+    expect(hints('📍附近有好多小店行')).toEqual([]);
+  });
+});
+
+describe('placeCandidates', () => {
+  const top = (s: string) => placeCandidates(s)[0];
+
+  it('searches a pinned venue in the city named elsewhere', () => {
+    expect(top('京都兩日一夜 📍八坂神社')).toEqual({ query: '八坂神社, 京都', countryCode: 'JP', marked: true });
+    expect(top('同朋友去咗間酒店（珠海）📍某某酒店 #珠海好去處')).toEqual({ query: '某某酒店, 珠海', countryCode: 'CN', marked: true });
+    // Hong Kong is its own city: no district added.
+    expect(top('📍Lookout Rock viewpoint Directions: walk up from Quarry Bay MTR')).toEqual({ query: 'Lookout Rock viewpoint', countryCode: 'HK', marked: true });
+  });
+
+  it('knows malls and addresses', () => {
+    expect(top('📍 K11 Musea 2/F 期間限定店')).toEqual({ query: 'K11 Musea', countryCode: 'HK', marked: true });
+    expect(top('地址：沙田新城市廣場二期3樓')).toEqual({ query: 'New Town Plaza, Sha Tin', countryCode: 'HK', marked: true });
+    expect(top('韓國Cafe推介 📍 @somecafe 서울특별시 마포구 예시로 10 #弘大')).toEqual({ query: '서울특별시 마포구 예시로 10', countryCode: 'KR', marked: true });
+    expect(top('📍12 Rue Exemple, 06000 Nice, France 夜晚好靚')).toEqual({ query: '12 Rue Exemple, 06000 Nice, France', countryCode: 'FR', marked: true });
+    expect(top('📍 Kyoto (Japan)')).toEqual({ query: 'Kyoto, Japan', countryCode: 'JP', marked: true, area: 'city' });
+  });
+
+  it('looks past "search it on Google Maps 👇" to the place', () => {
+    expect(top('📍地址: Google map 搵得到 👇 Sunny Beach Club 營業時間：週末 10:00-18:00 #西貢')).toEqual({
+      query: 'Sunny Beach Club',
+      countryCode: 'HK',
+      marked: true,
+    });
+  });
+
+  it('falls back to the city, region or country named', () => {
+    expect(top('北海道美食 📍小貼士：記得早啲去排隊')).toEqual({ query: '北海道', countryCode: 'JP', marked: false, area: 'region' });
+    expect(top('📌 English subtitles in the comments. Camping trip in Tasmania')).toEqual({
+      query: 'Tasmania',
+      countryCode: 'AU',
+      marked: false,
+      area: 'region',
+    });
+    expect(top('Great Barrier Reef 浮潛 澳洲')).toEqual({ query: 'Great Barrier Reef', countryCode: 'AU', marked: false, area: 'region' });
+    expect(top('#意大利 #羅馬 #法國')).toEqual({ query: '羅馬', countryCode: 'IT', marked: false, area: 'city' });
+    expect(top('放假去曼谷食嘢')).toEqual({ query: '曼谷', countryCode: 'TH', marked: false, area: 'city' });
+  });
+
+  it('puts a spot by a known place before the areas', () => {
+    expect(placeCandidates('Street food at Borough Market, London')).toEqual([
+      { query: 'Borough Market, London', countryCode: 'GB', marked: false },
+      { query: 'London', countryCode: 'GB', marked: false, area: 'city' },
+    ]);
+  });
+
+  it('skips a place named as a style, and people named after places', () => {
+    expect(placeCandidates('Hong Kong style cafe in Manchester')).toEqual([{ query: 'Manchester', countryCode: 'GB', marked: false, area: 'city' }]);
+    expect(placeCandidates('Hong Kong-style milk tea at home')).toEqual([]);
+    expect(placeCandidates('香港style茶餐廳 喺台北開分店')).toEqual([{ query: '台北', countryCode: 'TW', marked: false, area: 'city' }]);
+    expect(placeCandidates('Paris Hilton DJ set this Saturday')).toEqual([]);
+    expect(placeCandidates('Weekend in Paris with friends')[0]).toMatchObject({ query: 'Paris', countryCode: 'FR' });
+  });
+
+  it('finds nothing in text without a place', () => {
+    expect(placeCandidates('')).toEqual([]);
+    expect(placeCandidates('Easy weeknight pasta')).toEqual([]);
+    expect(placeCandidates('日本品牌嘅新電飯煲開箱')).toEqual([]);
+    expect(placeCandidates('秘密海灘🏖 唔講位置 (片尾有提示)')).toEqual([]);
+  });
+});
+
 describe('needsDetails / resolvePlaceDetails', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
@@ -479,6 +593,16 @@ describe('needsDetails / resolvePlaceDetails', () => {
     expect(isAreaPlace(at({ name: 'Lisboa', address: 'Lisboa, Portugal' }))).toBe(false); // a known city
     expect(isAreaPlace(at({ name: 'Portugal' }))).toBe(true);
     expect(isAreaPlace(undefined)).toBe(false);
+  });
+
+  it('knows regions by their Chinese / Japanese names too, so they get no random city', () => {
+    const region: Place = { lat: 43.2, lng: 142.8, name: '北海道', country: '日本', countryCode: 'JP' };
+    expect(isAreaPlace(region)).toBe(true);
+    expect(needsDetails(region)).toBe(false);
+    // A city keeps its own name as its city.
+    const city: Place = { lat: 34.69, lng: 135.5, name: '大阪', city: '大阪', country: '日本', countryCode: 'JP' };
+    expect(isAreaPlace(city)).toBe(false);
+    expect(needsDetails(city)).toBe(false);
   });
 
   it('does not look up a city a full search result already went without', async () => {

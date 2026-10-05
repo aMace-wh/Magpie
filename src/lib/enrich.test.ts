@@ -2,12 +2,14 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./metadata', () => ({ fetchPreview: vi.fn() }));
-const geoState = vi.hoisted(() => ({ paused: false }));
+vi.mock('./thumbs', () => ({ keepThumb: vi.fn(async () => undefined) }));
+const geoState = vi.hoisted(() => ({ paused: false, report: { asked: true, troubled: false } }));
 vi.mock('./geo', () => ({
   searchPlaces: vi.fn(),
   reverseGeocode: vi.fn(),
   geoHealth: () => ({ paused: geoState.paused, troubles: 0, userBusy: false }),
   backgroundSignal: vi.fn((parent?: AbortSignal) => parent ?? new AbortController().signal),
+  lookupReport: () => geoState.report,
 }));
 
 import { addItem, db, saveShared, type NewItem } from './db';
@@ -15,7 +17,9 @@ import { enrichItem, isShortLink, locationHints, looksLikeVenue, REFRESH_OPTIONS
 import { backgroundSignal, reverseGeocode, searchPlaces, type GeoResult } from './geo';
 import { fetchPreview, type LinkPreview } from './metadata';
 import { setSettings } from './settings';
+import { keepThumb } from './thumbs';
 import type { Item } from './types';
+import { ANALYSIS_VERSION } from './understand';
 import { toLocalIso } from './when';
 
 const preview = vi.mocked(fetchPreview);
@@ -43,6 +47,7 @@ beforeEach(async () => {
   await db.items.clear();
   vi.clearAllMocks();
   geoState.paused = false;
+  geoState.report = { asked: true, troubled: false };
   setSettings({ previews: true });
   preview.mockResolvedValue({});
   search.mockResolvedValue([]);
@@ -282,10 +287,77 @@ describe('enrichItem: auto-locate', () => {
     expect((await get(item.id)).place).toBeUndefined();
   });
 
-  it('ignores passing mentions without a marker', async () => {
+  it('files an event that only names its city under that city, in the right country', async () => {
     const item = await save({ type: 'event', title: 'Best gigs in Lisbon this year', sharedText: 'Best gigs in Lisbon this year' });
+    search.mockResolvedValue([
+      { lat: 44.03, lng: -70.1, name: 'Lisbon', city: 'Lisbon', country: 'United States', countryCode: 'US' },
+      { lat: 38.72, lng: -9.14, name: 'Lisboa', city: 'Lisboa', country: 'Portugal', countryCode: 'PT', address: 'Lisboa, Portugal' },
+    ]);
     await enrichItem(item.id, GUESSED);
+    expect(search.mock.calls.map((c) => c[0])).toEqual(['Lisbon']);
+    expect((await get(item.id)).place).toEqual({ lat: 38.72, lng: -9.14, name: 'Lisbon', city: 'Lisbon', country: 'Portugal', countryCode: 'PT' });
+    // No reverse lookup for a whole city: its centre would give a random street.
+    expect(reverse).not.toHaveBeenCalled();
+  });
+
+  it('ignores passing mentions on other kinds', async () => {
+    const recipe = await save({ type: 'recipe', title: 'Custard tarts', sharedText: 'Custard tarts like the ones in Lisbon' });
+    const video = await save({ type: 'video', title: 'Funny cats', sharedText: 'Funny cats from Lisbon' });
+    await enrichItem(recipe.id, GUESSED);
+    await enrichItem(video.id, GUESSED);
     expect(search).not.toHaveBeenCalled();
+  });
+
+  it('finds a pinned venue on any kind of save, and a generic kind becomes a place', async () => {
+    const item = await save({ type: 'video', url: 'https://www.instagram.com/reel/AbC123/', title: 'Instagram reel', sharedText: '' });
+    const caption = 'Late-night fado and the best custard tarts\n📍 Hot Clube de Portugal, Lisbon';
+    preview.mockResolvedValue({ title: 'Late-night fado and the best custard tarts', description: caption, caption });
+    search.mockResolvedValue([lisbonResult]);
+    await enrichItem(item.id, { replaceTitle: true, reclassify: true });
+    const saved = await get(item.id);
+    expect(search.mock.calls[0][0]).toBe('Hot Clube de Portugal, Lisbon');
+    expect(saved.place?.countryCode).toBe('PT');
+    expect(saved.type).toBe('place');
+    expect(saved.analyzed).toBe(ANALYSIS_VERSION);
+  });
+
+  it('falls back to the area when the pinned venue is not found, and asks at most twice', async () => {
+    const item = await save({ type: 'video', title: 'Instagram reel', note: '📍 Café Imaginário, Kyoto\nOur favourite matcha in Kyoto, Japan' });
+    search.mockResolvedValueOnce([]).mockResolvedValueOnce([{ lat: 35.01, lng: 135.77, name: '京都市', city: '京都市', country: '日本', countryCode: 'JP' }]);
+    await enrichItem(item.id, GUESSED);
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(search.mock.calls[1][0]).toBe('Kyoto');
+    expect((await get(item.id)).place).toMatchObject({ name: 'Kyoto', city: 'Kyoto', countryCode: 'JP' });
+  });
+
+  it("doesn't file a save under a country it names only in passing", async () => {
+    search.mockImplementation(async (q: string) => {
+      const code = /manchester/i.test(q) ? 'GB' : /hong kong|香港/i.test(q) ? 'HK' : /paris/i.test(q) ? 'FR' : /taipei|台北/i.test(q) ? 'TW' : /madrid/i.test(q) ? 'ES' : /lisbon/i.test(q) ? 'PT' : undefined;
+      return code ? [{ lat: 1, lng: 2, name: q, country: code, countryCode: code }] : [];
+    });
+    const cafe = await save({ type: 'place', title: 'Hong Kong style cafe in Manchester' });
+    const branch = await save({ type: 'place', title: '香港style茶餐廳 喺台北開分店' });
+    const dj = await save({ type: 'event', title: 'Paris Hilton DJ set this Saturday' });
+    const either = await save({ type: 'event', title: 'Lisbon or Madrid this weekend?' });
+    for (const item of [cafe, branch, dj, either]) await enrichItem(item.id, { replaceTitle: false, reclassify: false });
+    expect((await get(cafe.id)).place?.countryCode).toBe('GB');
+    expect((await get(branch.id)).place?.countryCode).toBe('TW');
+    expect((await get(dj.id)).place).toBeUndefined();
+    expect((await get(either.id)).place).toBeUndefined();
+    expect(search.mock.calls.map((c) => c[0])).toEqual(['Manchester', '台北']);
+  });
+
+  it("stays on the list of places to look up when the lookup never went out, so it's tried again later", async () => {
+    const item = await save({ type: 'event', sharedText: '📍 Hot Clube de Portugal, Lisbon' });
+    geoState.report = { asked: false, troubled: false };
+    search.mockRejectedValue(Object.assign(new Error('paused'), { name: 'GeoPausedError' }));
+    await enrichItem(item.id, GUESSED);
+    expect((await get(item.id)).locatePending).toBe(true);
+    // Asked and nothing found: settled.
+    geoState.report = { asked: true, troubled: false };
+    search.mockResolvedValue([]);
+    await enrichItem(item.id, GUESSED);
+    expect((await get(item.id)).locatePending).toBeUndefined();
     expect((await get(item.id)).place).toBeUndefined();
   });
 
@@ -299,7 +371,7 @@ describe('enrichItem: auto-locate', () => {
   });
 
   it('leaves other types, located saves and user choices alone', async () => {
-    const recipe = await save({ type: 'recipe', sharedText: '📍 Lisbon' });
+    const recipe = await save({ type: 'recipe', sharedText: 'Custard tarts, the Lisbon way' });
     const placed = await save({ type: 'event', sharedText: '📍 Lisbon', place: { lat: 1, lng: 1, city: 'X', country: 'Portugal', countryCode: 'PT' } });
     const cleared = await save({ type: 'event', sharedText: '📍 Lisbon' });
     await enrichItem(recipe.id, GUESSED);
@@ -346,6 +418,26 @@ describe('helpers', () => {
   it('keeps dates out of location hints', () => {
     expect(locationHints(`📍 Lisbon — ${futureDate().label}`)[0]).toBe('Lisbon');
     expect(locationHints('')).toEqual([]);
+  });
+});
+
+describe('enrichItem: other sites', () => {
+  it("never takes a page's publishing date for a posting day", async () => {
+    const day = toLocalIso(new Date());
+    const item = await save({ type: 'event', title: 'Jazz tonight', url: 'https://venue.example.com/jazz', sharedText: 'Jazz tonight 8pm! https://venue.example.com/jazz', when: { start: `${day}T20:00`, source: 'tonight 8pm' } });
+    preview.mockResolvedValue({ title: 'Live Jazz at the Blue Room', description: 'Live jazz every week in the back room.', publishedAt: `${day}T09:12:00.000Z`, siteName: 'Blue Room' });
+    await enrichItem(item.id, { replaceTitle: false, reclassify: true });
+    expect((await get(item.id)).when).toEqual({ start: `${day}T20:00`, source: 'tonight 8pm' });
+  });
+
+  it('says why no preview came back', async () => {
+    const item = await save({});
+    const heard: string[] = [];
+    preview.mockResolvedValue({ problem: 'timeout' });
+    expect(await enrichItem(item.id, { ...REFRESH_OPTIONS, onProblem: (p) => heard.push(p) })).toBe(false);
+    preview.mockResolvedValue({ title: 'A page' });
+    await enrichItem(item.id, { ...REFRESH_OPTIONS, onProblem: (p) => heard.push(p) });
+    expect(heard).toEqual(['timeout']);
   });
 });
 
@@ -401,7 +493,7 @@ describe('enrichItem: geo priority and back-off', () => {
     expect(search.mock.calls[0][2]).toMatchObject({ priority: 'background' });
     // resolvePlaceDetails only passes a signal on: a background one.
     expect(backgroundSignal).toHaveBeenCalled();
-    expect(reverse.mock.calls[0][2]?.signal).toBe(vi.mocked(backgroundSignal).mock.results[0].value);
+    expect(vi.mocked(backgroundSignal).mock.results.map((r) => r.value)).toContain(reverse.mock.calls[0][2]?.signal);
   });
 
   it('writes a found place and its details in one go', async () => {
@@ -410,8 +502,11 @@ describe('enrichItem: geo priority and back-off', () => {
     reverse.mockResolvedValue({ city: 'Lisbon', country: 'Portugal', countryCode: 'PT' });
     const update = vi.spyOn(db.items, 'update');
     await enrichItem(item.id, GUESSED);
-    expect(update).toHaveBeenCalledTimes(1);
+    // The place is written once, with its details (the save is only listed for a lookup before that).
+    const places = update.mock.calls.filter(([, changes]) => 'place' in (changes as object));
+    expect(places).toHaveLength(1);
     expect((await get(item.id)).place).toEqual({ lat: 38.7189, lng: -9.1446, name: 'Hot Clube de Portugal', city: 'Lisbon', country: 'Portugal', countryCode: 'PT' });
+    expect((await get(item.id)).locatePending).toBeUndefined();
     update.mockRestore();
   });
 
@@ -462,5 +557,99 @@ describe('enrichItem: geo priority and back-off', () => {
     expect(preview.mock.calls[0][1]).toBe(ctrl.signal);
     expect(reverse).not.toHaveBeenCalled();
     expect(await get(item.id)).toEqual(item);
+  });
+});
+
+describe('enrichItem: social posts', () => {
+  const reel = 'https://www.instagram.com/reel/AbC123xyz/';
+  const caption = 'Sunday market finds 🧺 fresh figs and the best sourdough\n📍 Borough Market, London\n#market #london';
+  const post: LinkPreview = {
+    title: 'Sunday market finds 🧺 fresh figs and the best sourdough',
+    rawTitle: caption.replace(/\s+/g, ' '),
+    description: caption,
+    caption,
+    image: 'https://scontent.cdninstagram.com/v/t51/123.jpg?oe=6A000000',
+    siteName: 'Instagram',
+    author: 'Mei Chan',
+    publishedAt: '2026-03-05T00:00:00.000Z',
+    type: 'video',
+  };
+
+  it('titles a reel from its caption, stores the author and keeps a copy of the picture', async () => {
+    const item = await save({ type: 'video', url: reel, title: 'Instagram reel', source: 'instagram' });
+    preview.mockResolvedValue(post);
+    search.mockResolvedValue([{ lat: 51.5055, lng: -0.091, name: 'Borough Market', city: 'London', country: 'United Kingdom', countryCode: 'GB' }]);
+    await enrichItem(item.id, GUESSED);
+    const saved = await get(item.id);
+    expect(saved.title).toBe('Sunday market finds 🧺 fresh figs and the best sourdough');
+    expect(saved.author).toBe('Mei Chan');
+    expect(saved.type).toBe('place');
+    expect(saved.place?.name).toBe('Borough Market');
+    expect(saved.when).toBeUndefined();
+    expect(keepThumb).toHaveBeenCalledWith(item.id, post.image);
+  });
+
+  it('replaces an account-name title on "Refresh preview", but never one the user typed', async () => {
+    const auto = await save({ type: 'video', url: reel, title: 'Mei Chan (@mei.eats) • Instagram reel' });
+    const mine = await save({ type: 'video', url: reel, title: 'Figs for Sunday' });
+    preview.mockResolvedValue(post);
+    await enrichItem(auto.id, { ...REFRESH_OPTIONS, priority: 'user' });
+    await enrichItem(mine.id, { ...REFRESH_OPTIONS, priority: 'user' });
+    expect((await get(auto.id)).title).toBe('Sunday market finds 🧺 fresh figs and the best sourdough');
+    expect((await get(mine.id)).title).toBe('Figs for Sunday');
+    // Someone is waiting: asked even if the preview service's daily allowance is used up.
+    expect(preview.mock.calls[0][2]).toEqual({ force: true });
+  });
+
+  it("drops a date that is only the day the post went up, and takes the caption's own", async () => {
+    const { label, iso } = futureDate(30);
+    const item = await save({ type: 'event', url: reel, title: 'Instagram reel', when: { start: '2026-03-05' } });
+    const text = `Pop-up market ${label}`;
+    preview.mockResolvedValue({ ...post, description: text, caption: text, title: 'Pop-up market', rawTitle: text });
+    await enrichItem(item.id, GUESSED);
+    expect((await get(item.id)).when?.start).toBe(iso);
+    // A date the user set is kept.
+    const mine = await save({ type: 'event', url: reel, title: 'Instagram reel', when: { start: '2026-03-07' } });
+    await enrichItem(mine.id, GUESSED);
+    expect((await get(mine.id)).when).toEqual({ start: '2026-03-07' });
+  });
+
+  it('keeps a title the user typed, even when it names the creator', async () => {
+    const typed = await save({ type: 'video', url: reel, title: 'Mei Chan' });
+    const refreshed = await save({ type: 'video', url: reel, title: 'Mei Chan' });
+    preview.mockResolvedValue({ ...post, title: 'Mei Chan (@mei.eats) • Instagram reel', rawTitle: 'Mei Chan (@mei.eats) • Instagram reel', caption: undefined, description: '1,234 likes, 5 comments - mei.eats on March 5, 2026: "Crispy smash burgers at home"' });
+    await enrichItem(typed.id, { replaceTitle: false, reclassify: false });
+    await enrichItem(refreshed.id, { ...REFRESH_OPTIONS, priority: 'user' });
+    expect((await get(typed.id)).title).toBe('Mei Chan');
+    expect((await get(refreshed.id)).title).toBe('Mei Chan');
+  });
+
+  it('leaves what the user picked in the save sheet: kind, tags, date', async () => {
+    const item = await save({ type: 'video', url: reel, title: 'Instagram reel', tags: ['mine'], edited: ['type', 'tags', 'when'] });
+    preview.mockResolvedValue(post);
+    await enrichItem(item.id, GUESSED);
+    expect(await get(item.id)).toMatchObject({ type: 'video', tags: ['mine'], title: post.title });
+  });
+
+  it('keeps an event date the caption gives for the day the post went up', async () => {
+    const today = new Date();
+    const day = toLocalIso(today);
+    const item = await save({ type: 'event', url: reel, title: 'Saved link', when: { start: `${day}T21:00`, source: 'Tonight 9pm' } });
+    const text = 'Tonight 9pm: DJ set with friends, free entry';
+    preview.mockResolvedValue({ ...post, title: text, rawTitle: text, description: text, caption: text, publishedAt: `${day}T00:00:00.000Z` });
+    await enrichItem(item.id, GUESSED);
+    expect((await get(item.id)).when).toEqual({ start: `${day}T21:00`, source: 'Tonight 9pm' });
+  });
+
+  it('marks a save analysed when there is nothing to look up, and asks the preview service normally in the background', async () => {
+    const item = await save({ type: 'video', url: reel, title: 'Instagram reel' });
+    const stretch = 'Five-minute stretch for desk days';
+    preview.mockResolvedValue({ ...post, title: stretch, rawTitle: stretch, description: stretch, caption: stretch, image: undefined });
+    await enrichItem(item.id, GUESSED);
+    const saved = await get(item.id);
+    expect(saved.analyzed).toBe(ANALYSIS_VERSION);
+    expect(search).not.toHaveBeenCalled();
+    expect(keepThumb).not.toHaveBeenCalled();
+    expect(preview.mock.calls[0][2]).toEqual({ force: false });
   });
 });

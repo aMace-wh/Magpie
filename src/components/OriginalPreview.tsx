@@ -25,6 +25,7 @@ import {
   type Embed,
 } from '../lib/embed';
 import { useSettings } from '../lib/settings';
+import { thumbFailed, thumbShown, useThumbSrc } from '../lib/thumbs';
 import type { Item } from '../lib/types';
 import { SourceIcon, sourceTint } from './SourceIcon';
 import './OriginalPreview.css';
@@ -140,10 +141,12 @@ interface FacadeProps {
 function Facade({ embed, item, waiting, onLoad, buttonRef }: FacadeProps) {
   const { previews } = useSettings();
   const [failed, setFailed] = useState<string[]>([]);
-  const candidates = [safeUrl(item.image), previews ? embed.poster : undefined].filter(
-    (u): u is string => !!u && !failed.includes(u),
-  );
+  // The save's own picture, or the small copy kept on this device once its link stops working (thumbs.ts hears how
+  // it went, so the save gets a fresh preview when there's no copy), else the platform's thumbnail.
+  const own = useThumbSrc(item);
+  const candidates = [own, previews ? embed.poster : undefined].filter((u): u is string => !!u && !failed.includes(u));
   const poster = candidates[0];
+  const mine = !!own && poster === own;
   const action = embed.kind === 'post' ? 'Load original post' : embed.kind === 'audio' ? 'Load player' : 'Load video';
   const cta = waiting ? 'Waiting for connection…' : action;
   const label = `${action} from ${embed.label}${waiting ? ' (waiting for connection)' : ''}`;
@@ -156,7 +159,8 @@ function Facade({ embed, item, waiting, onLoad, buttonRef }: FacadeProps) {
       alt=""
       loading="lazy"
       referrerPolicy="no-referrer"
-      onError={() => setFailed((f) => [...f, poster])}
+      onLoad={mine ? () => thumbShown(item.id, poster) : undefined}
+      onError={() => (mine ? thumbFailed(item.id, poster) : setFailed((f) => [...f, poster]))}
     />
   );
 
@@ -336,7 +340,8 @@ export function OriginalPreview({ item, defaultOpen = false, heading = true }: P
   // A plain note already shows this text as the note itself.
   if (!embed && !href && text === item.note?.trim()) return null;
 
-  const author = authorOf(item);
+  // Who posted it: saved from the preview, or an older save's "by …" description.
+  const author = item.author?.trim() || authorOf(item);
   // sourceLabel echoes keys it doesn't know ("soundcloud"); a real name from elsewhere reads better.
   const known = sourceLabel(item.source);
   const named = known && known !== item.source ? known : undefined;

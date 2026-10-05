@@ -1,5 +1,6 @@
 import { classify, cleanTitle, hashtags, warmRegExps as classifyRegExps } from './classify';
 import { extractLocationHints, guessCountry, warmRegExps as locationRegExps, warmTablesStep } from './location';
+import { warmRegExps as postRegExps } from './postText';
 import { findWhen, warmRegExps as whenRegExps } from './when';
 
 /**
@@ -188,6 +189,8 @@ export function* warmSteps(focus: () => TextKind | undefined = () => undefined):
   yield* compileAll(locationRegExps());
   yield* samples([() => extractLocationHints(SAMPLE), () => extractLocationHints(SAMPLE), () => guessCountry(SAMPLE)]);
   yield 'places';
+  // Reading social posts' captions, for when previews come in and older saves are looked at again.
+  yield* compileAll(postRegExps());
   // What was skipped while someone waited.
   for (const run of later) {
     quietly(run);
@@ -240,7 +243,8 @@ function pump() {
     next = undefined;
     return;
   }
-  if (next && (next.hurry || !hurry)) return;
+  // Nobody waits any more: back to idle time rather than one more back-to-back slice.
+  if (next && next.hurry === hurry) return;
   next?.cancel();
   const slice = (deadline: IdleDeadlineLike) => {
     next = undefined;

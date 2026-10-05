@@ -28,6 +28,7 @@ import type { When } from './types';
 const NOW = new Date(2026, 8, 30, 10, 0);
 const at = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m - 1, d, h, min);
 const x = (text: string, now = NOW) => extractWhen(text, now);
+const f = (text: string, now = NOW) => findWhen(text, now);
 /** start/end only, so expectations don't depend on the exact source phrase. */
 const se = (text: string, now = NOW) => {
   const w = x(text, now);
@@ -269,6 +270,145 @@ describe('extractWhen: false positives', () => {
 
   it('still reads a capitalised May', () => {
     expect(se('May 5')).toEqual({ start: '2027-05-05', end: undefined });
+  });
+});
+
+describe('extractWhen: CJK dates and times', () => {
+  it('reads 年月日, 月日 and 號, in fullwidth digits and Korean too', () => {
+    expect(se('2027年3月14日')).toEqual({ start: '2027-03-14', end: undefined });
+    expect(se('10月12日')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('10月12號')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('１０月１２日')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(se('10월 12일')).toEqual({ start: '2026-10-12', end: undefined });
+    expect(f('10月12日')?.confidence).toBe('high');
+    // A year and month alone is the whole month.
+    expect(se('2026年11月')).toEqual({ start: '2026-11-01', end: '2026-11-30' });
+  });
+
+  it('reads ranges within and across months', () => {
+    expect(se('10月3-9日')).toEqual({ start: '2026-10-03', end: '2026-10-09' });
+    expect(se('10月3日至9日')).toEqual({ start: '2026-10-03', end: '2026-10-09' });
+    expect(se('10月3日至11月15日')).toEqual({ start: '2026-10-03', end: '2026-11-15' });
+    expect(se('10月30日-11月2日')).toEqual({ start: '2026-10-30', end: '2026-11-02' });
+    expect(se('12月28日～1月3日')).toEqual({ start: '2026-12-28', end: '2027-01-03' });
+    expect(x('由10月3日至11月15日')).toEqual({ start: '2026-10-03', end: '2026-11-15', source: '由10月3日至11月15日' });
+  });
+
+  it('reads "from" and "until" phrases', () => {
+    expect(x('即日起至11月15日')).toEqual({ start: '2026-09-30', end: '2026-11-15', source: '即日起至11月15日' });
+    expect(se('展覽11月15日止')).toEqual({ start: '2026-09-30', end: '2026-11-15' });
+    expect(se('10月20日起')).toEqual({ start: '2026-10-20', end: undefined });
+  });
+
+  it('checks the weekday written after a date', () => {
+    expect(f('10月10日（六）')).toMatchObject({ when: { start: '2026-10-10' }, confidence: 'high' });
+    expect(f('10月10日(土)')).toMatchObject({ when: { start: '2026-10-10' }, confidence: 'high' });
+    // 10 Oct 2026 is a Saturday, not a Friday.
+    expect(f('10月10日（五）')?.confidence).toBe('low');
+  });
+
+  it('reads times next to the date', () => {
+    expect(se('10月10日 晚上7點')).toEqual({ start: '2026-10-10T19:00', end: undefined });
+    expect(se('10月10日晚上7點半')).toEqual({ start: '2026-10-10T19:30', end: undefined });
+    expect(se('10月10日 下午3時')).toEqual({ start: '2026-10-10T15:00', end: undefined });
+    expect(se('10月10日 中午12點')).toEqual({ start: '2026-10-10T12:00', end: undefined });
+    expect(se('10月10日 19:30')).toEqual({ start: '2026-10-10T19:30', end: undefined });
+    expect(se('10月10日 7:30pm')).toEqual({ start: '2026-10-10T19:30', end: undefined });
+    expect(se('10月10日（六）時間：晚上8:15')).toEqual({ start: '2026-10-10T20:15', end: undefined });
+    expect(se('10月10日 晚上8點至11點')).toEqual({ start: '2026-10-10T20:00', end: '2026-10-10T23:00' });
+  });
+
+  it('reads weekdays, with a time unless the week is named', () => {
+    expect(se('星期五 晚上8點')).toEqual({ start: '2026-10-02T20:00', end: undefined });
+    expect(se('週六晚上7點')).toEqual({ start: '2026-10-03T19:00', end: undefined });
+    expect(se('下星期五')).toEqual({ start: '2026-10-09', end: undefined });
+    expect(f('今個星期六')).toMatchObject({ when: { start: '2026-10-03' }, confidence: 'low' });
+    expect(x('星期五')).toBeUndefined();
+  });
+});
+
+describe('extractWhen: day/month without a year', () => {
+  it('reads a range when only one order makes sense, or after a label', () => {
+    expect(se('18/9-26/10')).toEqual({ start: '2026-09-18', end: '2026-10-26' });
+    expect(se('18/9 – 26/10')).toEqual({ start: '2026-09-18', end: '2026-10-26' });
+    expect(f('日期：18/9-26/10')).toMatchObject({ when: { start: '2026-09-18', end: '2026-10-26', source: '18/9-26/10' }, confidence: 'high' });
+    expect(se('27-29/11')).toEqual({ start: '2026-11-27', end: '2026-11-29' });
+    // 3/10 could be 3 Oct or 10 Mar: day first, but only after a label.
+    expect(se('日期：3/10-5/10')).toEqual({ start: '2026-10-03', end: '2026-10-05' });
+    expect(se('Dates: 3/10 - 5/10')).toEqual({ start: '2026-10-03', end: '2026-10-05' });
+    expect(x('3/10-5/10')).toBeUndefined();
+    // Weekdays settle it too, month first when only that fits (as written in Taiwan).
+    expect(f('3/10(六)-4/10(日)')).toMatchObject({ when: { start: '2026-10-03', end: '2026-10-04' }, confidence: 'high' });
+    expect(f('10/3(六)-10/4(日)')).toMatchObject({ when: { start: '2026-10-03', end: '2026-10-04' }, confidence: 'high' });
+  });
+
+  it('reads a single date only after a label or "until", or with its weekday', () => {
+    expect(se('日期：14/11')).toEqual({ start: '2026-11-14', end: undefined });
+    expect(se('14/11（六）')).toEqual({ start: '2026-11-14', end: undefined });
+    expect(f('3/10（六）')).toMatchObject({ when: { start: '2026-10-03' }, confidence: 'high' });
+    expect(f('10/3（六）')).toMatchObject({ when: { start: '2026-10-03' }, confidence: 'high' });
+    expect(f('3/10（五）')?.confidence).toBe('low');
+    expect(f('至14/11')).toMatchObject({ when: { start: '2026-09-30', end: '2026-11-14' }, confidence: 'high' });
+    // 3 Nov or 11 Mar? Offered, not applied.
+    expect(f('至3/11')).toMatchObject({ when: { start: '2026-09-30', end: '2026-11-03' }, confidence: 'low' });
+    expect(f('until 3/11')?.confidence).toBe('low');
+    expect(x('14/11')).toBeUndefined();
+    expect(x('1/2杯牛奶')).toBeUndefined();
+  });
+});
+
+describe('extractWhen: dates that are not the event’s', () => {
+  it('ignores the posting date in a post’s likes / comments wrapper', () => {
+    expect(x('1,234 likes, 56 comments - mei.eats on October 12, 2026: “Pasta night at home”')).toBeUndefined();
+    expect(x('21K likes, 306 comments - mei.eats on October 12, 2026')).toBeUndefined();
+    expect(x('mei.eats on October 12, 2026: “Pasta night at home”')).toBeUndefined();
+    expect(x('2,345 個讚、67 則留言 - mei.eats 於 2026年10月12日:「屋企煮意粉」')).toBeUndefined();
+    expect(x('Mei (@mei.eats) • Instagram reel\n1,234 likes, 56 comments - mei.eats on October 1, 2026: “Pasta night”')).toBeUndefined();
+    expect(x('Instagram post by Mei • Oct 12, 2026 at 10:00 AM')).toBeUndefined();
+    // The caption's own dates still count, and so does a sentence that only starts like a wrapper.
+    expect(se('1,234 likes, 56 comments - mei.eats on October 12, 2026: “Supper club Fri 16 Oct, 7.30pm”')).toEqual({
+      start: '2026-10-16T19:30',
+      end: undefined,
+    });
+    expect(se('Mei (@mei.eats) • Instagram reel\n1,234 likes - mei.eats on October 1, 2026: “日期：18/9-26/10”')).toEqual({
+      start: '2026-09-18',
+      end: '2026-10-26',
+    });
+    expect(se('Concert on October 12, 2026')).toEqual({ start: '2026-10-12', end: undefined });
+  });
+
+  it('ignores opening hours and repeating days', () => {
+    expect(x('開放時間：二至日 10:00-22:00')).toBeUndefined();
+    expect(x('營業時間：週一至五 10:00-19:00')).toBeUndefined();
+    expect(x('營業時間：週六 11:00-20:00')).toBeUndefined();
+    expect(x('Opening hours: Sat 10am-4pm')).toBeUndefined();
+    expect(x('Hours: Tue–Sun 9–5')).toBeUndefined();
+    expect(x('10:00-22:00')).toBeUndefined();
+    expect(x('逢星期六 晚上8點')).toBeUndefined();
+    expect(x('週末去海邊')).toBeUndefined();
+  });
+
+  it('ignores offers, booking windows and posting dates', () => {
+    expect(x('11月3-9期間訂購享9折')).toBeUndefined();
+    expect(x('優惠期：11月3日至9日')).toBeUndefined();
+    expect(x('早鳥優惠：即日起至10月20日')).toBeUndefined();
+    expect(x('10月20日前報名')).toBeUndefined();
+    expect(x('10月20日開售')).toBeUndefined();
+    expect(x('報名截止日期：10月20日')).toBeUndefined();
+    expect(x('發佈日期：2026年10月12日')).toBeUndefined();
+    expect(x('Book by 20 Oct for 10% off')).toBeUndefined();
+    expect(x('Early bird until 20 Oct')).toBeUndefined();
+    // The event itself is still read.
+    expect(se('早鳥優惠：即日起至10月20日\n日期：14/11（六）')).toEqual({ start: '2026-11-14', end: undefined });
+  });
+
+  it('ignores durations, seasons and counts', () => {
+    expect(x('9日遊3個城市')).toBeUndefined();
+    expect(x('26小時住宿')).toBeUndefined();
+    expect(x('由朝早9點到翌日下午4點')).toBeUndefined();
+    expect(x('每年 6–8 月最當造')).toBeUndefined();
+    expect(x('3月10個人去露營')).toBeUndefined();
+    expect(x('10月份')).toBeUndefined();
   });
 });
 

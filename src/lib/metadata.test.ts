@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchPreview } from './metadata';
+import { fetchPreview, previewsLimitedUntil, resetPreviewLimit } from './metadata';
 
 type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
@@ -25,6 +25,7 @@ const hang: Handler = (_url, init) =>
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  resetPreviewLimit();
 });
 
 describe('fetchPreview', () => {
@@ -181,13 +182,15 @@ describe('fetchPreview', () => {
     expect(await dateOf('2024-03-05 10:00:00-05')).toBe('2024-03-05T15:00:00.000Z');
   });
 
-  it('never throws on HTTP errors or bad JSON', async () => {
+  it('never throws on HTTP errors or bad JSON, and says nothing came back', async () => {
     mockFetch(() => json({ oops: true }, 500));
-    expect(await fetchPreview('https://example.com/d')).toEqual({});
+    expect(await fetchPreview('https://example.com/d')).toEqual({ problem: 'failed' });
     mockFetch(() => new Response('<html>not json</html>', { status: 200 }));
-    expect(await fetchPreview('https://www.tiktok.com/@a/video/1')).toEqual({});
+    expect(await fetchPreview('https://www.tiktok.com/@a/video/1')).toEqual({ problem: 'failed' });
     mockFetch(() => json(null));
-    expect(await fetchPreview('https://example.com/e')).toEqual({});
+    expect(await fetchPreview('https://example.com/e')).toEqual({ problem: 'failed' });
+    mockFetch(() => json({ status: 'fail' }));
+    expect(await fetchPreview('https://example.com/f')).toEqual({ problem: 'failed' });
   });
 
   it('gives up on slow services after the timeout', async () => {
@@ -196,9 +199,61 @@ describe('fetchPreview', () => {
     const pending = fetchPreview('https://vimeo.com/789');
     await vi.advanceTimersByTimeAsync(8000);
     await vi.advanceTimersByTimeAsync(8000);
-    await expect(pending).resolves.toEqual({});
+    await expect(pending).resolves.toEqual({ problem: 'timeout' });
     expect(fetch).toHaveBeenCalledTimes(2);
     for (const [, init] of fetch.mock.calls) expect(init?.signal?.aborted).toBe(true);
+  });
+
+  it('gives Instagram, Facebook and Threads longer', async () => {
+    vi.useFakeTimers();
+    const fetch = mockFetch(hang);
+    const pending = fetchPreview('https://www.instagram.com/reel/AbC123/');
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(fetch.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(7000);
+    await expect(pending).resolves.toEqual({ problem: 'timeout' });
+    expect(fetch.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  });
+
+  it('says when the daily allowance is used up', async () => {
+    mockFetch(() => json({ status: 'fail', code: 'ERATE' }, 429));
+    expect(await fetchPreview('https://www.instagram.com/p/AbC123/')).toEqual({ problem: 'limited' });
+    resetPreviewLimit();
+    mockFetch(() => json({ status: 'fail', code: 'ERATE' }));
+    expect(await fetchPreview('https://example.com/g')).toEqual({ problem: 'limited' });
+    resetPreviewLimit();
+    // The most telling reason wins: one service slow, the other out of requests.
+    vi.useFakeTimers();
+    mockFetch((url, init) => (isNoembed(url) ? hang(url, init) : json({}, 429)));
+    const pending = fetchPreview('https://vimeo.com/42');
+    await vi.advanceTimersByTimeAsync(8000);
+    await expect(pending).resolves.toEqual({ problem: 'limited' });
+  });
+
+  it('leaves microlink alone until tomorrow once its allowance is used up', async () => {
+    const now = new Date(2026, 9, 5, 15, 0).getTime();
+    vi.useFakeTimers({ now, toFake: ['Date'] });
+    let fetch = mockFetch(() => json({ status: 'fail', code: 'ERATE' }, 429));
+    expect(await fetchPreview('https://www.instagram.com/p/AbC123/')).toEqual({ problem: 'limited' });
+    expect(previewsLimitedUntil()).toBe(new Date(2026, 9, 6).getTime());
+    // Not asked again, but oEmbed services still are.
+    fetch = mockFetch((url) => (isNoembed(url) ? json({ title: 'A Vimeo film' }) : json({ status: 'success', data: { title: 'A page' } })));
+    expect(await fetchPreview('https://example.com/a')).toEqual({ problem: 'limited' });
+    expect((await fetchPreview('https://vimeo.com/7')).title).toBe('A Vimeo film');
+    expect(fetch.mock.calls.some(([u]) => isMicrolink(String(u)))).toBe(false);
+    // Someone tapped "Refresh preview": asked anyway, and an answer lifts the pause.
+    expect((await fetchPreview('https://example.com/a', undefined, { force: true })).title).toBe('A page');
+    expect(previewsLimitedUntil()).toBe(0);
+    // Late in the evening it still waits a few hours.
+    vi.setSystemTime(new Date(2026, 9, 5, 23, 30));
+    mockFetch(() => json({}, 429));
+    await fetchPreview('https://example.com/b');
+    expect(previewsLimitedUntil()).toBe(new Date(2026, 9, 6, 2, 30).getTime());
+  });
+
+  it('reports no problem once anything came back', async () => {
+    mockFetch((url) => (isNoembed(url) ? json({}, 429) : json({ status: 'success', data: { title: 'A Vimeo film' } })));
+    expect(await fetchPreview('https://vimeo.com/7')).toEqual({ title: 'A Vimeo film', rawTitle: 'A Vimeo film' });
   });
 
   it('stops when the caller aborts', async () => {
@@ -217,6 +272,115 @@ describe('fetchPreview', () => {
       image: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
     });
     expect(early).not.toHaveBeenCalled();
+  });
+
+  it('turns Instagram posts into their caption, author and date', async () => {
+    const fetch = mockFetch(() =>
+      json({
+        status: 'success',
+        data: {
+          title: 'Mei Chan (@mei.eats) • Instagram reel',
+          description: '1,234 likes, 56 comments - mei.eats on March 5, 2026: “Best dim sum in Mong Kok 🥟\n📍 Some Teahouse, Mong Kok\n#dimsum #hongkong”.',
+          image: { url: 'https://scontent.cdninstagram.com/v/t51/abc.jpg?oe=6A000000' },
+          publisher: 'Instagram',
+          date: '2026-10-01T00:00:00.000Z',
+        },
+      }),
+    );
+    const p = await fetchPreview('https://www.instagram.com/reel/AbC123/?igsh=MWQ1ZGUxMzBkMA==&stkn=YWJjZGVmZ2hpams=&utm_source=ig_web_copy_link');
+    // The services are asked about the link without per-share tokens.
+    expect(String(fetch.mock.calls[0][0])).toBe(`https://api.microlink.io/?url=${encodeURIComponent('https://www.instagram.com/reel/AbC123/')}`);
+    const caption = 'Best dim sum in Mong Kok 🥟\n📍 Some Teahouse, Mong Kok\n#dimsum #hongkong';
+    expect(p).toEqual({
+      title: 'Best dim sum in Mong Kok',
+      rawTitle: 'Best dim sum in Mong Kok 🥟 📍 Some Teahouse, Mong Kok #dimsum #hongkong',
+      description: caption,
+      caption,
+      image: 'https://scontent.cdninstagram.com/v/t51/abc.jpg?oe=6A000000',
+      siteName: 'Instagram',
+      author: 'Mei Chan',
+      publishedAt: '2026-03-05T00:00:00.000Z',
+      type: 'video',
+    });
+  });
+
+  it("reads posts only on social sites: a news site's dated quote is just its description", async () => {
+    for (const description of ['Published March 5, 2026: “We will fight on,” said the minister.', 'LONDON, March 5, 2026: "No deal tonight," the union said.']) {
+      mockFetch(() => json({ status: 'success', data: { title: 'Talks go on', description, publisher: 'Example News', url: 'https://news.example.com/a' } }));
+      const p = await fetchPreview('https://news.example.com/a');
+      expect(p).toMatchObject({ title: 'Talks go on', description, siteName: 'Example News' });
+      expect(p.author).toBeUndefined();
+      expect(p.caption).toBeUndefined();
+      expect(p.publishedAt).toBeUndefined();
+    }
+  });
+
+  it('reads translated Instagram descriptions and names the handle when the title doesn’t', async () => {
+    mockFetch(() =>
+      json({ status: 'success', data: { title: 'Instagram post', description: 'mei.eats 於 2026年10月3日:「【深水埗】三間必食小店 #美食」' } }),
+    );
+    expect(await fetchPreview('https://www.instagram.com/p/AbC123/')).toEqual({
+      title: '【深水埗】三間必食小店',
+      rawTitle: '【深水埗】三間必食小店 #美食',
+      description: '【深水埗】三間必食小店 #美食',
+      caption: '【深水埗】三間必食小店 #美食',
+      author: '@mei.eats',
+      publishedAt: '2026-10-03T00:00:00.000Z',
+    });
+  });
+
+  it('titles a post without a caption after its author', async () => {
+    mockFetch(() =>
+      json({ status: 'success', data: { title: 'Mei Chan (@mei.eats) • Instagram photo', description: '48K likes, 12K comments - mei.eats on June 2, 2026' } }),
+    );
+    expect(await fetchPreview('https://www.instagram.com/p/AbC123/?img_index=2')).toEqual({
+      title: 'Photo by Mei Chan',
+      rawTitle: 'Photo by Mei Chan',
+      author: 'Mei Chan',
+      publishedAt: '2026-06-02T00:00:00.000Z',
+      type: 'photo',
+    });
+    // A profile keeps its name.
+    mockFetch(() =>
+      json({
+        status: 'success',
+        data: { title: 'Mei Chan (@mei.eats) • Instagram photos and videos', description: '1,234 Followers, 56 Following, 78 Posts - See Instagram photos and videos from Mei Chan (@mei.eats)' },
+      }),
+    );
+    const profile = await fetchPreview('https://www.instagram.com/mei.eats/');
+    expect(profile.title).toBe('Mei Chan');
+    expect(profile.author).toBe('Mei Chan');
+    expect(profile.caption).toBeUndefined();
+  });
+
+  it('treats login walls as nothing', async () => {
+    mockFetch(() => json({ status: 'success', data: { title: 'Instagram', image: { url: 'https://static.cdninstagram.com/logo.png' } } }));
+    expect(await fetchPreview('https://www.instagram.com/reel/AbC123/')).toEqual({ problem: 'failed' });
+    mockFetch(() =>
+      json({
+        status: 'success',
+        data: { title: 'Login • Instagram', description: 'Create an account or log in to Instagram - Share what you’re into with the people who get you.' },
+      }),
+    );
+    expect(await fetchPreview('https://www.instagram.com/p/AbC123/')).toEqual({ problem: 'failed' });
+    mockFetch(() => json({ status: 'success', data: { title: 'Instagram reel' } }));
+    expect(await fetchPreview('https://www.instagram.com/reel/AbC123/')).toEqual({ problem: 'failed' });
+  });
+
+  it('reads Threads and Facebook posts', async () => {
+    mockFetch(() =>
+      json({ status: 'success', data: { title: 'Mei Chan (@mei.eats) on Threads', description: 'Where are the best egg tarts in town?\nAsking for a friend' } }),
+    );
+    const threads = await fetchPreview('https://www.threads.com/@mei.eats/post/AbC123');
+    expect(threads.title).toBe('Where are the best egg tarts in town?');
+    expect(threads.caption).toBe('Where are the best egg tarts in town?\nAsking for a friend');
+    expect(threads.author).toBe('Mei Chan');
+
+    mockFetch(() =>
+      json({ status: 'success', data: { title: '12K views · 345 reactions | Best noodles in Jordan 🍜 #food | By Mei Chan | Facebook', description: 'Best noodles in Jordan 🍜 #food' } }),
+    );
+    const fb = await fetchPreview('https://www.facebook.com/reel/123456789');
+    expect(fb).toMatchObject({ title: 'Best noodles in Jordan', caption: 'Best noodles in Jordan 🍜 #food', author: 'Mei Chan', type: 'video' });
   });
 
   it('only previews web links', async () => {

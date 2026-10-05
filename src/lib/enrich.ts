@@ -1,11 +1,12 @@
 import { classify, parsePlaceFromUrl, safeUrl } from './classify';
-import { db, uniqueTags } from './db';
-import { backgroundSignal, geoHealth, searchPlaces, type GeoOptions, type GeoPriority, type GeoResult } from './geo';
-import { extractLocationHints, guessCountry, mergePlaceDetails, needsDetails, resolvePlaceDetails } from './location';
+import { db } from './db';
+import { backgroundSignal, geoHealth, lookupReport, searchPlaces, type GeoPriority, type GeoResult } from './geo';
+import { extractLocationHints, guessCountry, mergePlaceDetails, needsDetails, resolvePlaceDetails, type PlaceCandidate } from './location';
 import { fetchPreview, type LinkPreview } from './metadata';
 import { getSettings } from './settings';
-import type { Item, Place } from './types';
-import { findWhen } from './when';
+import { keepThumb } from './thumbs';
+import type { EditedField, Item, Place, When } from './types';
+import { analyzeSave, ANALYSIS_VERSION, automaticTitle, mergeTags, shouldLocate, storedPreview, withoutDates, type SaveAnalysis } from './understand';
 
 export interface EnrichOptions {
   /** The title was generated, not typed — a real one from the page may replace it. */
@@ -24,6 +25,8 @@ export interface EnrichOptions {
   signal?: AbortSignal;
   /** Resolve only once place details are in. Default true; false resolves after the preview and finishes the place quietly. */
   waitForPlace?: boolean;
+  /** Told why no preview came back ('limited', 'timeout' or 'failed'), when none did. */
+  onProblem?: (problem: NonNullable<LinkPreview['problem']>) => void;
 }
 
 /**
@@ -109,46 +112,20 @@ export function resolvedShortLink(url: string | undefined, finalUrl: string | un
 // ---------------------------------------------------------------------------
 // Location hints
 
-/** The text with its date phrase(s) blanked out, so "📍 Lisbon — Sat 10 Oct" doesn't become a place called "Lisbon, Sat 10 Oct". */
-function withoutDates(text: string, now = new Date()): string {
-  let out = text;
-  for (let i = 0; i < 3; i++) {
-    const m = findWhen(out, now);
-    if (!m) break;
-    // Take a joining word or dash in front of it along ("Lisbon on 12 Oct", "Lisbon · Sat 12 Oct").
-    const lead = /(?:[ \t]+(?:on|from|until|till|til|this|next)|[ \t]*[,·•|–—-])[ \t]*$/i.exec(out.slice(0, m.index));
-    const start = lead ? lead.index : m.index;
-    out = `${out.slice(0, start)}\n${out.slice(m.index + m.length)}`;
-  }
-  return out;
-}
-
 /** Likely place mentions in shared text, best first (offline). */
 export function locationHints(text: string, max = 5): string[] {
   if (!text.trim()) return [];
   return extractLocationHints(withoutDates(text)).slice(0, max);
 }
 
-const MARKER_RE = /(?:\u{1F4CD}|\u{1F4CC})\uFE0F?|\b(?:location|address|venue|where|located at|find us at)[ \t]*[:\uFF1A]/giu;
-const hintKey = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-
-/** Hints written right after an explicit marker: "📍 Kyoto", "Location: Borough Market, London". */
-function markedHints(text: string): string[] {
-  const out: string[] = [];
-  for (const m of text.matchAll(MARKER_RE)) {
-    const line = text.slice(m.index).split('\n')[0];
-    const value = hintKey(line.slice(m[0].length));
-    const first = extractLocationHints(line)[0];
-    // Only when the value itself is the place, not something mentioned later on the line.
-    if (first && value.startsWith(hintKey(first.split(',')[0]))) out.push(first);
-  }
-  return out;
-}
+const CJK_WORDS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
 /** Looks like a venue name ("Dishoom Covent Garden", "Tasca do Chico"), not a sentence or a listicle. */
 export function looksLikeVenue(title: string | undefined): boolean {
   const t = title?.trim();
   if (!t || t.length > 60 || /[!?#@:|•…\n]|https?:/i.test(t)) return false;
+  // Latin words mixed with Chinese / Japanese / Korean ones read as a sentence ("Send畀佢 …"), not a name.
+  if (CJK_WORDS.test(t) && /\p{Script=Latin}/u.test(t)) return false;
   if (/^(?:the\s+)?(?:(?:best|top|how|why|what|where|when|my|our|this|these)\b|\d)/i.test(t)) return false;
   const words = t.split(/\s+/);
   if (words.length > 6 || !/^\p{Lu}/u.test(words[0])) return false;
@@ -180,43 +157,103 @@ export function pickResult(results: GeoResult[], expected: string | undefined, s
   return match ?? (strict ? undefined : results[0]);
 }
 
-/** A conservative guess at where a place / event save is. Wrong locations are worse than none. */
-async function autoLocate(item: Item, preview: LinkPreview, geo: GeoOptions): Promise<Place | undefined> {
-  const text = withoutDates([item.title, item.sharedText, item.note, preview.description].filter(Boolean).join('\n'));
-  const first = extractLocationHints(text)[0];
-  if (!first) return undefined;
-  let query: string | undefined;
-  if (markedHints(text).some((h) => hintKey(h) === hintKey(first))) query = first;
-  else if (item.type === 'place' && preview.title && looksLikeVenue(preview.title)) {
-    query = hintKey(preview.title).includes(hintKey(first)) ? preview.title : `${preview.title}, ${first}`;
+/** A place for a whole city, region or country: the name the post used, in the country it must be in. */
+export function areaPlace(c: PlaceCandidate, r: GeoResult): Place {
+  const place: Place = { lat: r.lat, lng: r.lng, name: c.area === 'country' ? (r.country ?? c.query) : c.query };
+  if (c.area === 'city') place.city = c.query;
+  if (r.country) place.country = r.country;
+  if (r.countryCode) place.countryCode = r.countryCode;
+  return place;
+}
+
+interface Located {
+  place?: Place;
+  /** A search went out and was answered (or failed by itself), rather than being dropped (paused, offline, cancelled). */
+  asked: boolean;
+  /** …and it timed out or couldn't reach the service. */
+  troubled: boolean;
+}
+
+/** The candidates name `code` more often than any other country. */
+function clearly(candidates: PlaceCandidate[], code: string): boolean {
+  const counts = new Map<string, number>();
+  for (const c of candidates) if (c.countryCode) counts.set(c.countryCode, (counts.get(c.countryCode) ?? 0) + 1);
+  const mine = counts.get(code) ?? 0;
+  return [...counts].every(([k, n]) => k === code || n < mine);
+}
+
+const sameKey = (a: string, b: string) => a.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '').includes(b.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''));
+
+/**
+ * Looks up where a save is, conservatively (a wrong location is worse than none): its best specific candidate (a
+ * pinned venue or address, a known spot, or for a place save a venue-like page title), else the city, region or
+ * country it names, kept as an area place so the save still files under its country. A result only counts in
+ * the country the text points to. At most two searches.
+ */
+async function locate(item: Item, a: SaveAnalysis, preview: LinkPreview, priority: GeoPriority, parent?: AbortSignal): Promise<Located> {
+  const candidates = a.candidates.filter((c) => c.countryCode);
+  const top = candidates[0];
+  if (!top) return { asked: false, troubled: false };
+  // A city, region or country to fall back on, when the text can't be about another one: pinned, next to a pinned
+  // spot, or the country it names clearly more than any other ("Hong Kong café in Manchester" names two).
+  const area = candidates.find((c) => c.area && c.countryCode === top.countryCode && (c.marked || (top.marked && !top.area) || clearly(candidates, top.countryCode!)));
+  const tries: { query: string; code: string; area?: PlaceCandidate }[] = [];
+  // A page titled like a venue ("Dishoom Covent Garden"), not a caption: on a place save, that's what to find.
+  const venue = item.type === 'place' && !a.caption && !(top.marked && !top.area) && looksLikeVenue(preview.title) ? preview.title : undefined;
+  if (venue) {
+    const near = area ?? top;
+    tries.push({ query: sameKey(venue, near.query) ? venue : `${venue}, ${near.query}`, code: top.countryCode! });
+  } else if (!top.area) tries.push({ query: top.query, code: top.countryCode! });
+  if (area) tries.push({ query: area.query, code: area.countryCode!, area });
+
+  // resolvePlaceDetails only passes a signal on, so for background work the signal carries the priority.
+  const signal = priority === 'background' ? backgroundSignal(parent) : parent;
+  let place: Place | undefined;
+  for (const t of tries.slice(0, 2)) {
+    if (signal?.aborted) break;
+    let results: GeoResult[];
+    try {
+      results = await searchPlaces(t.query, undefined, { priority, signal });
+    } catch {
+      break;
+    }
+    if (t.area) {
+      const r = results.find((x) => x.countryCode === t.code);
+      if (r) place = areaPlace(t.area, r);
+    } else {
+      // Only the best match, and only in the right country.
+      const r = pickResult(results.slice(0, 1), t.code, true);
+      if (r) place = placeFromResult(r);
+    }
+    if (place) break;
   }
-  // Only when we can check the answer is in the right country.
-  const expected = countryHint(first, text);
-  if (!query || !expected) return undefined;
-  try {
-    const top = (await searchPlaces(query, undefined, geo))[0];
-    const fits = top && pickResult([top], expected, true);
-    return fits ? placeFromResult(fits) : undefined;
-  } catch {
-    return undefined;
-  }
+  const report = signal ? lookupReport(signal) : { asked: true, troubled: false };
+  return { place, ...report };
 }
 
 // ---------------------------------------------------------------------------
 
+const sameWhen = (a: When | undefined, b: When | undefined) => a?.start === b?.start && a?.end === b?.end;
+
+interface Plan {
+  changes: Partial<Item>;
+  analysis: SaveAnalysis;
+  /** A location should be looked up (the save has none and its text names one worth finding). */
+  locate: boolean;
+}
+
 /** What the preview adds to the save, without touching anything the user has set. */
-function planChanges(before: Item, item: Item, preview: LinkPreview, opts: EnrichOptions): Partial<Item> {
+function planChanges(before: Item, item: Item, preview: LinkPreview, opts: EnrichOptions, link: boolean): Plan {
   const changes: Partial<Item> = {};
-  const locate = opts.locate !== false;
+  const userSet = (f: EditedField) => !!item.edited?.includes(f);
+  const locate = opts.locate !== false && !userSet('place');
   const fill = opts.overwrite ? () => true : (current: unknown) => !current;
   if (preview.image && fill(item.image)) changes.image = preview.image;
   if (preview.description && fill(item.description)) changes.description = preview.description;
   if (preview.siteName && fill(item.siteName)) changes.siteName = preview.siteName;
-  // Only replace the title if the user hasn't edited it in the meantime.
-  if (preview.title && opts.replaceTitle && item.title === before.title) changes.title = preview.title;
 
   // Short links carry no video ID or coordinates: keep where they lead instead, so embeds and maps work.
-  const resolved = item.url === before.url ? resolvedShortLink(item.url, preview.finalUrl) : undefined;
+  const resolved = link && item.url === before.url ? resolvedShortLink(item.url, preview.finalUrl) : undefined;
   if (resolved && item.url) {
     changes.url = resolved;
     if (!item.sharedText?.trim()) changes.sharedText = item.url;
@@ -226,35 +263,74 @@ function planChanges(before: Item, item: Item, preview: LinkPreview, opts: Enric
   }
 
   const finalUrl = safeUrl(preview.finalUrl);
-  if (locate && !item.place && finalUrl) {
-    const { place, name } = parsePlaceFromUrl(finalUrl);
+  const url = changes.url ?? (isWall(finalUrl) ? undefined : finalUrl) ?? item.url;
+  if (locate && !item.place) {
     // "/maps/place/<name>/@…" names the venue; a "/maps/search/<query>" doesn't.
-    if (place) changes.place = name && /\/maps\/place\//.test(finalUrl) ? { ...place, name } : place;
+    const fromFinal = finalUrl ? parsePlaceFromUrl(finalUrl) : {};
+    if (fromFinal.place) changes.place = fromFinal.name && /\/maps\/place\//.test(finalUrl!) ? { ...fromFinal.place, name: fromFinal.name } : fromFinal.place;
+    else if (changes.url) {
+      const fromLink = parsePlaceFromUrl(changes.url).place;
+      if (fromLink) changes.place = fromLink;
+    }
   }
 
-  if (opts.reclassify && item.type === before.type && (preview.title || preview.description)) {
-    const better = classify({
-      // The raw title keeps the caption's hashtags, which are good evidence and tags.
-      title: preview.rawTitle ?? preview.title ?? item.title,
-      text: [preview.description, item.note].filter(Boolean).join('\n'),
-      url: changes.url ?? (isWall(finalUrl) ? undefined : finalUrl) ?? item.url,
-    });
-    const generic = item.type === 'link' || item.type === 'video' || item.type === 'note';
-    if (better.confidence !== 'low' && better.type !== item.type && generic) changes.type = better.type;
-    const tags = uniqueTags([...item.tags, ...better.tags]).slice(0, Math.max(item.tags.length, 6));
+  // The title may change while it's automatic: what the save started with (the link's own, "Instagram reel"), an
+  // account or platform name, or on an older post the account's display name. Never one the user typed.
+  const generated = !userSet('title') && opts.replaceTitle && item.title === before.title;
+  const a = analyzeSave(
+    {
+      url,
+      source: changes.source ?? item.source,
+      title: generated ? undefined : item.title,
+      type: item.type,
+      sharedText: changes.sharedText ?? item.sharedText,
+      note: item.note,
+      when: item.when,
+      place: item.place,
+      author: item.author,
+      edited: item.edited,
+    },
+    preview,
+  );
+  const content = link && !!(preview.title || preview.description || preview.caption);
+
+  if (link && a.title && a.title !== item.title && (generated || automaticTitle(item))) changes.title = a.title;
+
+  // A generic kind (link, video, note) gives way to what the caption is about, with its tags.
+  if (opts.reclassify && content) {
+    if (item.type === before.type && a.type !== item.type) changes.type = a.type;
+    const tags = userSet('tags') ? item.tags : mergeTags(item.tags, a.tags);
     if (tags.length !== item.tags.length) changes.tags = tags;
-    if (locate && !item.place && !changes.place && better.place) changes.place = better.place;
+  }
+  if (link && !item.author && a.author && (preview.author || content)) changes.author = a.author;
+
+  // An event date from the caption, unless the user has set (or cleared) one. A date read from the post's "on
+  // August 15, 2026" line (the day it went up) goes, and the caption's own date takes its place.
+  if (link && !userSet('when')) {
+    const type = changes.type ?? item.type;
+    const date = opts.dates !== false && a.when && (a.whenConfidence === 'high' || type === 'event') ? a.when : undefined;
+    if (a.dropWhen && sameWhen(before.when, item.when)) changes.when = date;
+    else if (!before.when && !item.when && date) changes.when = date;
   }
 
-  // An event date from the page or caption, unless the user has set (or cleared) one.
-  if (opts.dates !== false && !before.when && !item.when) {
-    const type = changes.type ?? item.type;
-    const text = [preview.rawTitle ?? preview.title, preview.description, item.sharedText, item.note].filter(Boolean).join('\n');
-    const m = findWhen(text);
-    if (m && (m.confidence === 'high' || type === 'event')) changes.when = m.when;
-  }
-  return changes;
+  const wanted = locate && !item.place && !changes.place && shouldLocate(changes.type ?? item.type, a.candidates);
+  // Looked at in full (kind and all): the start-up pass over older saves can skip it.
+  if (opts.reclassify && content && item.analyzed !== ANALYSIS_VERSION) changes.analyzed = ANALYSIS_VERSION;
+  // A place to look up: done now, or (if that's put off) by the start-up pass. Has one now: nothing to look up.
+  if (wanted && !item.locatePending) changes.locatePending = true;
+  else if (item.locatePending && (item.place || changes.place)) changes.locatePending = undefined;
+  return { changes, analysis: a, locate: wanted };
 }
+
+/** Fields that are only bookkeeping: changing them alone gives no new version. */
+const BOOKKEEPING = new Set<string>(['analyzed', 'locatePending']);
+
+/** The changes with a new version, unless they're only bookkeeping (cards and caches then stay as they are). */
+const versioned = (changes: Partial<Item>): Partial<Item> =>
+  Object.keys(changes).some((k) => !BOOKKEEPING.has(k)) ? { ...changes, updatedAt: Date.now() } : changes;
+
+/** Takes a save off the list of places to look up. */
+const settled = (cur: Item): Partial<Item> | undefined => (cur.locatePending ? { locatePending: undefined } : undefined);
 
 /** Re-reads the item and applies `patch(current)` in one transaction. Resolves true when something was written. */
 async function guardedUpdate(id: string, patch: (current: Item) => Partial<Item> | undefined): Promise<boolean> {
@@ -262,7 +338,7 @@ async function guardedUpdate(id: string, patch: (current: Item) => Partial<Item>
     const current = await db.items.get(id);
     const changes = current && patch(current);
     if (!changes || !Object.keys(changes).length) return false;
-    await db.items.update(id, { ...changes, updatedAt: Date.now() });
+    await db.items.update(id, versioned(changes));
     return true;
   });
 }
@@ -283,37 +359,55 @@ export async function enrichItem(id: string, opts: EnrichOptions): Promise<boole
   const before = await db.items.get(id);
   if (!before) return false;
   const link = safeUrl(before.url);
-  const preview: LinkPreview = link ? await fetchPreview(link, opts.signal) : {};
+  // Someone waiting on it ("Refresh preview") may ask even while the preview service's allowance is used up.
+  const preview: LinkPreview = link ? await fetchPreview(link, opts.signal, { force: opts.priority === 'user' }) : {};
   if (opts.signal?.aborted) return false;
   const fetched = gotPreview(preview);
+  if (!fetched && preview.problem) opts.onProblem?.(preview.problem);
 
-  // Network first, then one short transaction: never hold one open across a fetch.
-  const item = await db.transaction('rw', db.items, async (): Promise<Item | undefined> => {
+  // Network first, then one short transaction: never hold one open across a fetch (or the text analysis).
+  const ahead = planChanges(before, before, preview, opts, !!link);
+  const planned = await db.transaction('rw', db.items, async (): Promise<{ item: Item; plan: Plan } | undefined> => {
     const current = await db.items.get(id);
     if (!current) return undefined;
-    const changes = link ? planChanges(before, current, preview, opts) : {};
-    if (Object.keys(changes).length) await db.items.update(id, { ...changes, updatedAt: Date.now() });
-    return { ...current, ...changes };
+    // Changed while the preview loaded: planned again from what's there now.
+    const plan = JSON.stringify(current) === JSON.stringify(before) ? ahead : planChanges(before, current, preview, opts, !!link);
+    const { changes } = plan;
+    if (Object.keys(changes).length) await db.items.update(id, versioned(changes));
+    return { item: { ...current, ...changes }, plan };
   });
-  if (!item || !getSettings().previews) return fetched;
+  if (!planned) return fetched;
+  const { item, plan } = planned;
+  // Signed image links (Instagram, Facebook…) stop working within days: keep a small copy on this device.
+  if (plan.changes.image) void keepThumb(id, plan.changes.image);
+  if (!getSettings().previews) return fetched;
 
-  const places = enrichPlace(id, item, preview, opts);
+  const places = enrichPlace(id, item, plan, preview, opts);
   if (opts.waitForPlace === false) void places.catch(() => undefined);
   else await places;
   return fetched;
 }
 
 /** Finds a location when the save has none and fills in its details, then writes both at once. */
-async function enrichPlace(id: string, item: Item, preview: LinkPreview, opts: EnrichOptions): Promise<void> {
+async function enrichPlace(id: string, item: Item, plan: Plan, preview: LinkPreview, opts: EnrichOptions): Promise<void> {
   const priority = opts.priority ?? 'background';
   // The geo service keeps timing out: skip quietly. The startup backfill catches up later.
   if (priority === 'background' && geoHealth().paused) return;
   const { signal } = opts;
 
   let place = item.place;
-  const located = !place && opts.locate !== false && (item.type === 'place' || item.type === 'event');
-  if (located) place = await autoLocate(item, preview, { priority, signal });
-  if (!place || signal?.aborted) return;
+  let done = false;
+  if (plan.locate) {
+    const found = await locate(item, plan.analysis, preview, priority, signal);
+    place = found.place;
+    // Looked up (found or not): not tried again. Dropped or troubled: the start-up pass tries again another time.
+    done = found.asked && !found.troubled;
+  }
+  if (signal?.aborted) return;
+  if (!place) {
+    if (done) await guardedUpdate(id, settled);
+    return;
+  }
 
   const at = place;
   let full = at;
@@ -324,8 +418,8 @@ async function enrichPlace(id: string, item: Item, preview: LinkPreview, opts: E
     full = await resolvePlaceDetails(at, { name: item.type !== 'place', signal: geoSignal }).catch(() => at);
   }
   if (signal?.aborted) return;
-  // A place we found: only if the user hasn't set one meanwhile.
-  if (located) await guardedUpdate(id, (cur) => (cur.place ? undefined : { place: full }));
+  // A place we found: only if the user hasn't set (or cleared) one meanwhile.
+  if (plan.locate) await guardedUpdate(id, (cur) => (cur.place || cur.edited?.includes('place') ? settled(cur) : { place: full, locatePending: undefined }));
   else if (full !== at) {
     await guardedUpdate(id, (cur) => {
       // Only if the location hasn't been changed in the meantime.
@@ -334,4 +428,40 @@ async function enrichPlace(id: string, item: Item, preview: LinkPreview, opts: E
       return merged === cur.place ? undefined : { place: merged };
     });
   }
+}
+
+/**
+ * Looks up where a stored save is, from what's stored with it (backfill.ts), and takes it off the list of places to
+ * look up (Item.locatePending) once that's settled. Never when the user set or cleared its place. Resolves whether a
+ * search went out and whether it ran into trouble (a timeout or network error).
+ */
+export async function locateSaved(id: string, signal?: AbortSignal): Promise<{ asked: boolean; troubled: boolean; located: boolean }> {
+  const item = await db.items.get(id);
+  if (!item) return { asked: false, troubled: false, located: false };
+  const preview = storedPreview(item);
+  const analysis = item.place || item.edited?.includes('place') ? undefined : analyzeSave(item, preview);
+  // The stored title is the user's (or the caption's), not a page title to search for.
+  delete preview.title;
+  if (!analysis || !shouldLocate(item.type, analysis.candidates)) {
+    await guardedUpdate(id, settled);
+    return { asked: false, troubled: false, located: false };
+  }
+  const found = await locate(item, analysis, preview, 'background', signal);
+  if (signal?.aborted) return { ...found, located: false };
+  let full = found.place;
+  if (full && needsDetails(full)) {
+    const at = full;
+    full = await resolvePlaceDetails(at, { name: item.type !== 'place', signal: backgroundSignal(signal) }).catch(() => at);
+  }
+  let located = false;
+  if (full || (found.asked && !found.troubled)) {
+    await guardedUpdate(id, (cur) => {
+      if (full && !cur.place && !cur.edited?.includes('place')) {
+        located = true;
+        return { place: full, locatePending: undefined };
+      }
+      return settled(cur);
+    });
+  }
+  return { asked: found.asked, troubled: found.troubled, located };
 }

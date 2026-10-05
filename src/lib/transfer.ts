@@ -1,9 +1,9 @@
-import { normalizeUrl, safeUrl, SOURCE_ID_RE, TRACKING_PARAMS } from './classify';
+import { isTrackingParam, normalizeUrl, safeUrl, SOURCE_ID_RE } from './classify';
 import { buildItem, db, uniqueTags } from './db';
 import { uid } from './id';
 import { mergePlaceDetails } from './location';
 import { getDeviceId, isWhenEnd, isWhenString, normalizePayload, shortHash, type SharedCollection, type SharedItemV2, type SharedPayloadV2 } from './share';
-import { COLLECTION_COLORS, ITEM_TYPES, TYPE_INFO, type Collection, type Item, type ItemType, type Place, type SharedFrom, type When } from './types';
+import { COLLECTION_COLORS, EDITED_FIELDS, ITEM_TYPES, TYPE_INFO, type Collection, type Item, type ItemType, type Place, type SharedFrom, type When } from './types';
 
 function safeLink(raw: unknown): string | undefined {
   if (typeof raw === 'string' && raw.startsWith('geo:')) return normalizeUrl(raw);
@@ -127,7 +127,7 @@ export function urlKey(raw: string | undefined): string | undefined {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined;
   const host = u.hostname.toLowerCase().replace(/^(?:www\.|m\.|mobile\.)/, '');
   const params = [...u.searchParams]
-    .filter(([k]) => !TRACKING_PARAMS.test(k))
+    .filter(([k]) => !isTrackingParam(u, k))
     .sort(([a, av], [b, bv]) => (a === b ? (av < bv ? -1 : av > bv ? 1 : 0) : a < b ? -1 : 1));
   const query = params.length ? `?${new URLSearchParams(params).toString()}` : '';
   // Keep hash routes ("#/…", "#!…"), which some sites use as real paths.
@@ -691,10 +691,17 @@ export async function importBackup(raw: unknown): Promise<{ items: number; colle
       };
       const when = safeWhen(i.when);
       const sharedText = safeText(i.sharedText, 5000);
+      const author = safeText(i.author, 100);
       const from = safeFrom(i.from, now);
       if (when) item.when = when;
       if (sharedText) item.sharedText = sharedText;
+      if (author) item.author = author;
       if (from) item.from = from;
+      // What the analysis already did, and what the user set by hand, so a restore doesn't redo (or undo) it.
+      if (Number.isInteger(i.analyzed) && i.analyzed! > 0 && i.analyzed! < 1000) item.analyzed = i.analyzed;
+      const edited = Array.isArray(i.edited) ? EDITED_FIELDS.filter((f) => i.edited!.includes(f)) : [];
+      if (edited.length) item.edited = edited;
+      if (i.locatePending === true && !item.place) item.locatePending = true;
       return item;
     });
   await db.transaction('rw', db.items, db.collections, async () => {

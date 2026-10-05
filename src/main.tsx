@@ -35,10 +35,12 @@ function whenIdle(task: () => void, delay = 4000): void {
   }, delay);
 }
 
-// Fill in city / country for older saves that only have coordinates (a few per session, never blocking startup).
+// Background catch-up, a little per session and never blocking startup: older saves looked at again (titles from
+// captions, kinds, dates, places), city / country for saves that only have coordinates, and previews or pictures
+// that didn't come.
 const backfill = () =>
   void import('./lib/backfill')
-    .then((m) => m.backfillPlaceDetails())
+    .then((m) => m.backgroundWork())
     .catch(() => {});
 whenIdle(backfill);
 window.addEventListener('online', () => whenIdle(backfill, 2000));

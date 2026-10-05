@@ -70,9 +70,23 @@ export function safeUrl(raw: unknown): string | undefined {
   return u && /^https?:/i.test(u) ? u : undefined;
 }
 
-/** Per-sharer tracking parameters platforms add to links (Instagram igsh, YouTube si, TikTok _t, utm_*…). */
+/** Per-sharer tracking parameters platforms add to links (Instagram igsh / stkn, YouTube si, TikTok _t, utm_*…). */
 export const TRACKING_PARAMS =
-  /^(?:utm_\w+|fbclid|gclid|dclid|gbraid|wbraid|msclkid|mc_cid|mc_eid|igsh|igshid|si|feature|mibextid|ref_src|ref_url|_branch_match_id|share_source|xmt|_t|_r|is_from_webapp|sender_device|web_id|share_app_id|share_link_id|u_code|tt_from)$/i;
+  /^(?:utm_\w+|fbclid|gclid|dclid|gbraid|wbraid|msclkid|mc_cid|mc_eid|igsh|igshid|stkn|si|feature|mibextid|ref_src|ref_url|_branch_match_id|share_source|xmt|_t|_r|is_from_webapp|sender_device|web_id|share_app_id|share_link_id|u_code|tt_from)$/i;
+
+// Instagram posts, reels and IGTV ("/p/…", "/reel/…", "/user/reel/…", "/share/p/…").
+const IG_POST_PATH = /^\/(?:[\w.]+\/)?(?:p|reels?|tv)\/[\w-]+/;
+
+/**
+ * Whether `key` is only tracking on this link: a known tracking parameter, or on an Instagram post anything but
+ * img_index (which photo of a carousel), since the rest are per-share tokens that keep changing.
+ */
+export function isTrackingParam(url: URL, key: string): boolean {
+  if (TRACKING_PARAMS.test(key)) return true;
+  if (key === 'img_index') return false;
+  const host = url.hostname.toLowerCase();
+  return (hostMatches(host, 'instagram.com') || hostMatches(host, 'instagr.am')) && IG_POST_PATH.test(url.pathname);
+}
 
 /** The link without tracking parameters (unchanged, character for character, when it has none). */
 export function stripTracking(raw: string): string {
@@ -84,7 +98,7 @@ export function stripTracking(raw: string): string {
     return raw;
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return raw;
-  const drop = [...new Set(u.searchParams.keys())].filter((k) => TRACKING_PARAMS.test(k));
+  const drop = [...new Set(u.searchParams.keys())].filter((k) => isTrackingParam(u, k));
   if (!drop.length) return raw;
   for (const k of drop) u.searchParams.delete(k);
   return u.toString();
@@ -421,20 +435,22 @@ const keywordSignals = (): Partial<Record<ItemType, Signal[]>> => (signals ??= {
     w('bakery|patisserie', 2, 'bakery'),
     w('hidden gems?|must[- ]visit|must[- ]try|bucket list|places to|spots? in|things to do|where to eat|best .{0,20} in', 3),
     w('traveltok|traveltiktok|travelgram|placestovisit|hiddengems?|bucketlist|cafehopping|foodspots?', 2),
-    w('travel|trip|itinerary|holiday|vacation|getaway|weekend in|days in', 2, 'travel'),
+    w('travel(?:l?(?:ers?|ing))?|trips?|road ?trips?|itinerar(?:y|ies)|holidays?|vacations?|getaways?|weekend in|days in', 2, 'travel'),
+    w('travel (?:tips|guide)|first[- ]time (?:visitors?|travell?ers?)|get(?:ting)? around|routes?|directions|how to get there|getting there|opening (?:hours|times)|address(?=\\s*[:：])', 2),
     w('hotels?|hostel|resort|cabin|airbnb|stay at', 2, 'stay'),
-    w('beach(?:es)?|island|coast', 2, 'beach'),
-    w('hikes?|hiking|trails?|walks? in|national park|mountains?', 2, 'outdoors'),
+    w('beach(?:es)?|islands?|coast', 2, 'beach'),
+    w('hikes?|hiking|trails?|walks? in|national park|mountains?|summits?|lookouts?|viewpoints?|waterfalls?', 2, 'outdoors'),
     w('museums?|galler(?:y|ies)|exhibitions?', 2, 'culture'),
     w('markets?|food hall', 1, 'market'),
   ],
   product: [
-    w('buy|shop(?:ping)?|on sale|discount|deal|promo code|wishlist|add to cart|in stock', 2),
+    w('buy|shop(?:ping)?|on sale|discount|deal|promo code|wishlist|add to cart|in stock|perfumes?|fragrances?|colognes?|skincare|lipsticks?|sneakers', 2),
     w('amazon finds?|tiktok made me buy|haul|must[- ]haves?|gift ideas?|amazonfinds|tiktokmademebuyit|founditonamazon|amazonmusthaves|giftideas|giftguide', 3, 'wishlist'),
     w('[$£€]\\s?\\d+(?:[.,]\\d{2})?', 1),
   ],
   book: [
     w('books?|novels?|reading list|booktok|bookstagram|tbr|paperback|hardback|audiobooks?', 3),
+    w('book ?lists?|book recs?|book recommendations?|books? (?:to|you should|you need to) read|must[- ]reads?|currently reading', 2),
   ],
   music: [
     w('songs?|albums?|playlists?|tracks?|spotify|mixtape', 2),
@@ -468,6 +484,211 @@ const RECAP_RE = w(
   'highlights?|recap|aftermovie|after movie|full (?:set|show|concert|performance|episode|match|video)|concert film|documentary|vlog|tutorial|how to|reaction|throwback|tbt|official (?:music |lyric )?video|music video|lyric video|ted talk|keynote',
   0,
 ).re;
+
+// ---------------------------------------------------------------------------
+// CJK keyword signals
+//
+// Chinese and Japanese don't put spaces between words, so word-boundary regexes never match there. These terms
+// are found as plain substrings instead, in one pass over the text with a table keyed on each term's first
+// character, which costs the same however many terms there are. Terms are written in Traditional Chinese (the
+// Simplified spelling is added from T2S); Japanese and Korean spellings are listed as they are.
+
+interface CjkSignal {
+  type?: ItemType;
+  weight: number;
+  tag?: string;
+  /** A way to book or turn up (like BOOKING_RE), or a recording / how-to (like RECAP_RE). */
+  flag?: 'booking' | 'recap';
+  /** The term only counts with this closing mark soon after, and is quoted whole ("《書名》"). */
+  close?: string;
+}
+
+// Traditional → Simplified, for the characters used in the terms below.
+const T2S =
+  '處处訪访遊游隱隐點点邊边兒儿裡里絕绝觀观勝胜標标記记駕驾環环島岛國国機机飯饭館馆營营訂订廳厅麵面鍋锅樂乐覓觅餅饼灘滩凍冻潛潜頂顶' +
+  '陽阳峽峡園园紅红葉叶楓枫賞赏櫻樱廟庙宮宫蹟迹術术藝艺場场開开時时間间業业麼么東东戶户橫横濱滨輕轻澤泽沖冲繩绳岡冈長长廣广爾尔濟济' +
+  '邁迈內内檳槟順顺門门蓮莲墾垦蘭兰慶庆雲云麗丽歐欧倫伦羅罗馬马義义臘腊聖圣亞亚紐纽約约磯矶譜谱學学調调醃腌預预熱热湯汤爐炉氣气電电' +
+  '燉炖勻匀攪搅種种濃浓簡简單单懶懒敗败減减廚厨當当運运動动訓训練练鍛锻鍊炼煉炼習习強强線线撐撑頸颈軟软啞哑鈴铃壺壶槓杠壓压著着體体' +
+  '態态勢势圓圆駝驼貴贵無无會会騷骚節节華华購购搶抢鳥鸟劇剧話话棟栋篤笃閃闪覽览驗验講讲檔档對对報报顧顾溫温買买齊齐網网團团碼码優优' +
+  '價价錢钱幣币鏡镜頭头護护膚肤妝妆錶表聯联書书評评讀读後后說说薦荐繪绘閱阅專专輯辑詞词題题鋼钢結结彈弹烏乌編编欄栏論论導导寶宝療疗' +
+  '煙烟郵邮員员納纳試试黃黄傳传統统';
+
+type CjkGroup = [signal: CjkSignal | null, terms: string];
+
+const cg = (type: ItemType | undefined, weight: number, terms: string, tag?: string, flag?: CjkSignal['flag']): CjkGroup => [
+  { type, weight, tag, flag },
+  terms,
+];
+
+/** Each group counts once, like a word signal. A null signal marks words that only look like a term ("運動員"). */
+const CJK_GROUPS = (): CjkGroup[] => [
+  // Places & travel
+  cg('place', 3, '好去處 必去 必訪 必遊 秘境 隱世 避世 寶藏 去邊玩 去哪玩 去哪兒 去哪裡 值得一去 絕景 穴場 가볼만한곳 핫플'),
+  cg('place', 2, '打卡 景點 觀光 観光 名勝 地標 勝地 명소 관광'),
+  cg('place', 2, '旅行 旅遊 自由行 遊記 行程 自駕遊 自駕 一日遊 度假 渡假 出走 小旅行 環島 打工度假 北上 背包客 出國 機票 旅程 🗺 ✈ 🧳 여행', 'travel'),
+  cg('place', 2, '酒店 住宿 民宿 飯店 旅館 度假村 渡假村 露營 營地 入住 退房 訂房 住一晚 🏨 ホテル 호텔 숙소', 'stay'),
+  cg('place', 3, '餐廳 食店 茶餐廳 餐館 麵店 居酒屋 火鍋店 レストラン 식당 맛집', 'restaurant'),
+  cg('place', 2, '美食 必食 必吃 必試 抵食 吃喝玩樂 搵食 覓食 探店 宵夜 食好西 グルメ'),
+  cg('place', 2, '早午餐 ブランチ 브런치', 'brunch'),
+  cg('place', 3, '咖啡店 咖啡廳 咖啡館 甜品店 茶室 カフェ 喫茶店 카페', 'coffee'),
+  cg('place', 2, '酒吧 清吧', 'drinks'),
+  cg('place', 2, '麵包店 餅店 ベーカリー 빵집', 'bakery'),
+  cg('place', 2, '海灘 沙灘 海邊 海景 島 果凍海 浮潛 🏖 🏝 ⛱ ビーチ 해변 바다', 'beach'),
+  cg('place', 2, '行山 登山 山頂 瀑布 郊野 郊遊 日落 夕陽 日出 觀星 峽谷 公園 花海 紅葉 楓葉 賞花 櫻花 등산', 'outdoors'),
+  cg('place', 2, '神社 寺廟 寺 廟 神宮 八幡宮 教堂 古蹟 老城 博物館 美術館 藝術館 城堡 宮殿 ⛩ 박물관', 'culture'),
+  cg('place', 2, '溫泉 泡湯 湯泉 水療 スパ 온천'),
+  cg('place', 2, '夜市 街市 傳統市場 商店街', 'market'),
+  cg('place', 2, '📍 地址 地點 住所 주소'),
+  cg('place', 2, '開放時間 營業時間 定休日 休館 點去 怎麼去 怎麼走 交通方式 交通指南 前往方法 如何前往 アクセス'),
+  // Somewhere people travel to (not home countries, which turn up in every kind of post).
+  cg(
+    'place',
+    2,
+    '北海道 札幌 小樽 函館 富良野 青森 東京 大阪 京都 奈良 神戶 神戸 名古屋 橫濱 横浜 箱根 輕井澤 軽井沢 富士山 沖繩 沖縄 福岡 九州 宮崎 ' +
+      '鹿兒島 鹿児島 熊本 長崎 廣島 広島 四國 金澤 金沢 仙台 首爾 서울 釜山 부산 濟州 제주 曼谷 清邁 布吉 普吉 芭堤雅 峇里 巴厘島 峴港 河內 ' +
+      '胡志明 新加坡 吉隆坡 檳城 深圳 廣州 珠海 惠州 南澳 順德 澳門 台北 台中 台南 高雄 花蓮 墾丁 宜蘭 九份 上海 北京 成都 重慶 西安 杭州 ' +
+      '桂林 雲南 大理 麗江 歐洲 巴黎 倫敦 羅馬 意大利 義大利 法國 南法 瑞士 冰島 西班牙 巴塞隆拿 巴塞隆納 土耳其 希臘 伊斯坦堡 聖托里尼 杜拜 ' +
+      '澳洲 雪梨 悉尼 墨爾本 黃金海岸 塔斯曼尼亞 紐西蘭 新西蘭 紐約 洛杉磯 夏威夷',
+  ),
+
+  // Recipes
+  cg('recipe', 3, '食譜 菜譜 煮法 教煮 料理教學 レシピ 作り方 레시피'),
+  cg('recipe', 3, '材料 用料 調味料 醃 預熱 湯匙 茶匙 下鍋 爆香 焗爐 烤箱 電飯煲 재료'),
+  cg('recipe', 2, '氣炸鍋 ノンフライヤー 에어프라이어', 'air-fryer'),
+  cg('recipe', 2, '做法 煮 焗 燉 炆 小炒 清蒸 炒香 煎香 炸至 煎至 拌勻 攪拌 下廚 家常菜 自煮 便當 만들기'),
+  cg('recipe', 2, '甜品 甜點 蛋糕 曲奇 布甸 布丁 スイーツ 디저트', 'dessert'),
+  cg('recipe', 2, '麵包 酸種 烘焙 吐司', 'baking'),
+  cg('recipe', 2, '煲湯 湯水 老火湯 濃湯', 'soup'),
+  cg('recipe', 2, '咖喱 咖哩 カレー', 'curry'),
+  cg('recipe', 1, '減脂餐 健康餐 低卡 高蛋白', 'healthy'),
+  cg('recipe', 1, '簡單 簡単 快手 懶人 零失敗 簡易', 'quick'),
+
+  // Workouts
+  cg('workout', 3, '運動 健身 訓練 鍛鍊 鍛煉 健身房 居家運動 重訓 筋トレ トレーニング 운동 홈트'),
+  cg('workout', 3, '高強度間歇', 'hiit'),
+  cg('workout', 2, '腹肌 核心肌群 馬甲線 小腹 平板支撐 腹筋 복근', 'core'),
+  cg('workout', 2, '臀 瘦腿 練腿 美腿 하체', 'legs'),
+  cg('workout', 3, '瑜伽 瑜珈 ヨガ 요가', 'yoga'),
+  cg('workout', 3, '皮拉提斯 普拉提 彼拉提斯 ピラティス 필라테스', 'pilates'),
+  cg('workout', 2, '拉筋 拉伸 伸展 舒展 筋膜 肩頸 柔軟度 ストレッチ 스트레칭', 'mobility'),
+  cg('workout', 2, '跑步 有氧 慢跑 燃脂 跳繩 馬拉松', 'cardio'),
+  cg('workout', 2, '肌肉 肌群 增肌 啞鈴 壺鈴 槓鈴 深蹲 硬拉 掌上壓 伏地挺身', 'strength'),
+  cg('workout', 2, '動作 跟著做 跟住做 跟練 一起練 在家練習 居家練習 徒手 免器材 不需要器材 無需器材'),
+  cg('workout', 2, '體態 姿勢 圓肩 駝背 寒背 富貴包'),
+
+  // Events
+  cg('event', 3, '演唱會 音樂會 開騷 ライブ 콘서트', 'live-music'),
+  cg('event', 3, '音樂節 嘉年華 フェス 페스티벌', 'festival'),
+  cg('event', 3, '門票 購票 訂票 售票 搶票 公售 開售 預售 早鳥 入場券 チケット 티켓 예매', undefined, 'booking'),
+  cg('event', 3, '音樂劇 舞台劇 話劇 劇場 演出 首演 公演 棟篤笑 沉浸式劇場 沉浸式演出 ミュージカル 뮤지컬 공연'),
+  cg('event', 3, '快閃 限定店 期間限定 煙花 巡遊 花火大会 ポップアップ 팝업'),
+  cg('event', 3, '展覽 特展 藝術展 展出 開幕 漫展 書展 博覽會 展覧会 展示会 전시'),
+  cg('event', 3, '工作坊 體驗班 手作班 講座 分享會 ワークショップ 워크숍 원데이클래스', 'workshop'),
+  cg('event', 3, '首映 放映 電影節 影展', 'film'),
+  cg('event', 2, '展期 演期 檔期'),
+  cg('event', 2, '市集', 'market'),
+  cg('event', 1, '派對 盛事 節目 イベント 이벤트'),
+  cg(undefined, 0, '報名 預約 預訂 立即登記', undefined, 'booking'),
+  cg(undefined, 0, '回顧 精華 花絮 重溫 教學 教程', undefined, 'recap'),
+
+  // Products
+  cg('product', 2, '購買 購入 買齊 買到 入手 下單 網購 團購 免運 包郵 優惠碼 折扣碼 優惠券 減價 特價 折扣 買一送一 訂購 🛒 구매 할인'),
+  cg('product', 3, '好物 開箱 種草 敗家 必買 開封 언박싱', 'wishlist'),
+  cg('product', 1, '價格 價錢 售價 定價 原價 港幣'),
+  cg('product', 2, '相機 鏡頭 耳機 香水 護膚品 化妝品 口紅 唇膏 面霜 乳霜 精華液 手袋 包包 波鞋 球鞋 運動鞋 運動服 手錶 コスメ 향수'),
+  cg('product', 2, '品牌 牌子 聯名 新品 新色 限量'),
+
+  // Books
+  cg('book', 3, '書單 好書 書評 讀後感 推薦書 必讀 讀書會 読書 おすすめ本 독서 책추천'),
+  cg('book', 2, '小說 新書 繪本 書籍 書店 出版社 小説'),
+  cg('book', 2, '閱讀 讀書 看書 讀完'),
+
+  // Music & podcasts
+  cg('music', 2, '音樂 歌曲 新歌 單曲 專輯 歌單 歌詞 翻唱 主題曲 播放清單 歌 音楽 プレイリスト 노래 음악 🎵 🎶'),
+  cg('music', 2, '鋼琴 結他 吉他 和弦 樂理 自彈自唱 樂器 烏克麗麗 作曲 編曲 節奏 節奏訓練 爵士鼓 ピアノ ギター 피아노 🎹 🎸'),
+  cg('music', 2, '播客 電台節目 ポッドキャスト 팟캐스트', 'podcast'),
+
+  // Articles
+  cg('article', 2, '文章 全文 專欄 長文 社論 報導 報道 記事 기사 칼럼'),
+
+  [null, '運動員 運動會 社會運動 動作片 歌舞伎 島國'],
+];
+
+const BOOK_TITLE: CjkSignal = { type: 'book', weight: 1, close: '》' };
+
+// Built on first use (or by the warm-up), like the word signals.
+type CjkTable = Map<number, [term: string, signal: CjkSignal | null][]>;
+let cjkTable: CjkTable | undefined;
+function cjkTerms(): CjkTable {
+  if (cjkTable) return cjkTable;
+  const t2s = new Map<string, string>();
+  for (let i = 0; i + 1 < T2S.length; i += 2) t2s.set(T2S[i], T2S[i + 1]);
+  const table: CjkTable = new Map();
+  const added = new Set<string>();
+  const add = (term: string, signal: CjkSignal | null) => {
+    if (added.has(term)) return;
+    added.add(term);
+    const bucket = table.get(term.charCodeAt(0));
+    if (bucket) bucket.push([term, signal]);
+    else table.set(term.charCodeAt(0), [[term, signal]]);
+  };
+  for (const [signal, terms] of [...CJK_GROUPS(), [BOOK_TITLE, '《'] as CjkGroup]) {
+    for (const term of terms.split(' ')) {
+      add(term, signal);
+      let simplified = '';
+      for (let k = 0; k < term.length; k++) simplified += t2s.get(term[k]) ?? term[k];
+      if (simplified !== term) add(simplified, signal);
+    }
+  }
+  // Longest first, so "居家運動" wins over "運動" and "廣島" over "島".
+  for (const bucket of table.values()) if (bucket.length > 1) bucket.sort((x, y) => y[0].length - x[0].length);
+  return (cjkTable = table);
+}
+
+/** Everything below this is Latin, Greek, Cyrillic, symbols…: no term starts there (✈ U+2708 is the lowest). */
+const CJK_SCAN_FROM = 0x2600;
+
+/** Adds the CJK terms found in `text` to `ev`, and reports any booking or recap words. */
+function scanCjk(text: string, ev: Map<ItemType, Evidence>): { booking: boolean; recap: boolean } {
+  let table: CjkTable | undefined; // only built once there's something it could match
+  const seen = new Set<CjkSignal>();
+  let booking = false;
+  let recap = false;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < CJK_SCAN_FROM) continue;
+    const bucket = (table ??= cjkTerms()).get(code);
+    if (!bucket) continue;
+    for (const [term, signal] of bucket) {
+      if (!text.startsWith(term, i)) continue;
+      let found = term;
+      if (signal?.close) {
+        const end = text.indexOf(signal.close, i + 1);
+        if (end < 0 || end - i > 40) continue;
+        found = text.slice(i, end + 1);
+      }
+      i += found.length - 1;
+      if (signal && !seen.has(signal)) {
+        seen.add(signal);
+        if (signal.flag === 'booking') booking = true;
+        if (signal.flag === 'recap') recap = true;
+        if (signal.type && signal.weight) {
+          const e = ev.get(signal.type) ?? { score: 0, terms: [], tags: [] };
+          e.score += signal.weight;
+          e.terms.push({ term: found, weight: signal.weight });
+          if (signal.tag && !e.tags.includes(signal.tag)) e.tags.push(signal.tag);
+          ev.set(signal.type, e);
+        }
+      }
+      break;
+    }
+  }
+  return { booking, recap };
+}
+
+// Kana, CJK ideographs and Hangul. Word signals read the text with each run of these as one space: "去cafe打卡"
+// then reads "cafe", and a long Chinese caption leaves them only its few Latin words to scan.
+const CJK_RUN_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+/g;
 
 /** Keyword types in tie-break order; event goes last so ties never produce a surprise event. */
 const KEYWORD_ORDER: ItemType[] = ['recipe', 'workout', 'place', 'product', 'book', 'music', 'article', 'event'];
@@ -519,12 +740,20 @@ interface Evidence {
   tags: string[];
 }
 
-function scoreText(text: string): Map<ItemType, Evidence> {
+interface Scored {
+  ev: Map<ItemType, Evidence>;
+  /** Words for booking or turning up, and for a recording or how-to (see eventAllowed). */
+  booking: boolean;
+  recap: boolean;
+}
+
+function scoreText(text: string): Scored {
   const out = new Map<ItemType, Evidence>();
+  const latin = text.replace(CJK_RUN_RE, ' ');
   for (const type of KEYWORD_ORDER) {
     const e: Evidence = { score: 0, terms: [], tags: [] };
     for (const s of keywordSignals()[type] ?? []) {
-      const m = s.re.exec(text);
+      const m = s.re.exec(latin);
       if (!m) continue;
       e.score += s.weight;
       e.terms.push({ term: m[1].toLowerCase().replace(/\s+/g, ' ').trim(), weight: s.weight });
@@ -532,7 +761,24 @@ function scoreText(text: string): Map<ItemType, Evidence> {
     }
     if (e.score > 0) out.set(type, e);
   }
-  return out;
+  const cjk = scanCjk(text, out);
+  return { ev: out, booking: cjk.booking || BOOKING_RE.test(latin), recap: cjk.recap || RECAP_RE.test(latin) };
+}
+
+/** A letter, digit or "_" for hashtag purposes, by code unit: ASCII, kana, CJK ideographs, Hangul. */
+const isWordCode = (c: number) =>
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 ||
+  (c >= 0x3040 && c <= 0x9fff) || (c >= 0xac00 && c <= 0xd7af) || (c >= 0xf900 && c <= 0xfaff);
+
+/** Whether a CJK term is a hashtag of its own: "#自由行", not "#日本自由行" or "#自由行日記". */
+function cjkHashtag(text: string, term: string): boolean {
+  for (const mark of ['#', '＃']) {
+    const tag = mark + term;
+    for (let i = text.indexOf(tag); i >= 0; i = text.indexOf(tag, i + 1)) {
+      if ((i === 0 || !isWordCode(text.charCodeAt(i - 1))) && !isWordCode(text.charCodeAt(i + tag.length))) return true;
+    }
+  }
+  return false;
 }
 
 /** Matches that are patterns rather than words, described instead of quoted ("best pasta in" → a list). */
@@ -551,7 +797,9 @@ function termReasons(terms: Term[], human: string, pathWords: boolean): string[]
   const text = human.toLowerCase().replace(/\s+/g, ' ');
   const shown = terms.filter(({ term }) => pathWords || text.includes(term)).sort((a, b) => b.weight - a.weight);
   const top = shown[0]?.weight ?? 0;
-  const within = (inner: string, outer: string) => ` ${outer} `.includes(` ${inner} `);
+  // CJK terms have no spaces around them: "旅遊" is inside "旅遊攻略" as it is.
+  const within = (inner: string, outer: string) =>
+    inner.charCodeAt(0) >= CJK_SCAN_FROM ? outer.includes(inner) : ` ${outer} `.includes(` ${inner} `);
   for (const { term, weight } of shown) {
     // Modifiers like "quick" or "15 minute" only explain a guess when nothing stronger does.
     if (weight < 2 && top >= 2) continue;
@@ -560,7 +808,10 @@ function termReasons(terms: Term[], human: string, pathWords: boolean): string[]
       if (!phrases.includes(phrase)) phrases.push(phrase);
       continue;
     }
-    const isTag = new RegExp(`(?:^|[^\\p{L}\\p{N}_])[#＃]${escapeRe(term)}(?![\\p{L}\\p{N}_])`, 'iu').test(text);
+    const isTag =
+      term.charCodeAt(0) >= CJK_SCAN_FROM
+        ? cjkHashtag(text, term)
+        : new RegExp(`(?:^|[^\\p{L}\\p{N}_])[#＃]${escapeRe(term)}(?![\\p{L}\\p{N}_])`, 'iu').test(text);
     if (isTag) {
       if (!tags.includes(`#${term}`)) tags.push(`#${term}`);
       tagWeight = Math.max(tagWeight, weight);
@@ -607,6 +858,8 @@ const STRONG_HINTS: RegExp[] = [
   new RegExp(`\\b(?:this|next|coming)\\s+(?:weekend|week|month|${DAYS}|${DAYS_SHORT})\\b`, 'gi'),
   new RegExp(`\\bon\\s+${DAYS}\\b`, 'gi'),
   new RegExp(`\\b${DAYS}\\s+(?:night|evening|(?:at\\s+)?\\d{1,2}(?::[0-5]\\d)?\\s*(?:am|pm))\\b`, 'gi'),
+  // "10月3日", "9月5日至11月20日", "10月3-9", "日期：3/12", "Dates: 3/12"
+  /\d{1,2}月\d{1,2}(?:[日號号]?\s*[-–~～至到]\s*(?:\d{1,2}月)?\d{1,2}[日號号]?|[日號号])|(?:日期|展期|檔期|档期|演期|\bdates?)\s*[:：]\s*\d{1,2}\s*[/.月]\s*\d{1,2}(?:\s*[-–~～至到]\s*\d{1,2}\s*[/.月]\s*\d{1,2})?/gi,
 ];
 
 const WEAK_HINTS: RegExp[] = [
@@ -617,6 +870,9 @@ const WEAK_HINTS: RegExp[] = [
 
 // Opening hours and routines aren't events: "open Saturday", "every Friday night".
 const RECURRING_BEFORE = /\b(?:every|open|closed)\s+(?:on\s+)?$/i;
+// When a post went up, not a date in it: "1,234 likes, 5 comments - chef on August 1, 2026: …" (handles are lowercase).
+const POSTED_BEFORE = /^(?:[\d.,]+\s*[KkMm]?\s+likes?,\s*[\d.,]+\s*[KkMm]?\s+comments?\s*[-–—]\s*)?[a-z0-9._]{1,30} on $/;
+const POSTED_AFTER = /^,\s*\d{4}(?::|\s*(?:\n|$))/;
 
 interface TimeHint {
   phrase: string;
@@ -628,8 +884,13 @@ function findTimeHint(text: string): TimeHint | undefined {
   const find = (patterns: RegExp[]) => {
     for (const re of patterns) {
       for (const m of text.matchAll(re)) {
-        const before = text.slice(Math.max(0, (m.index ?? 0) - 16), m.index);
-        if (!RECURRING_BEFORE.test(before)) return m[0].replace(/\s+/g, ' ').trim().slice(0, 40);
+        const at = m.index ?? 0;
+        const before = text.slice(Math.max(0, at - 16), at);
+        if (RECURRING_BEFORE.test(before)) continue;
+        const line = text.lastIndexOf('\n', at - 1) + 1;
+        const end = at + m[0].length;
+        if (at - line < 120 && POSTED_BEFORE.test(text.slice(line, at)) && POSTED_AFTER.test(text.slice(end, end + 12))) continue;
+        return m[0].replace(/\s+/g, ' ').trim().slice(0, 40);
       }
     }
     return undefined;
@@ -668,10 +929,8 @@ function applyTimeHint(ev: Map<ItemType, Evidence>, hint: TimeHint | undefined):
  * or workshop tutorial is still a video: it needs a date or a way to book, and recap words
  * ("highlights", "full set", "tutorial") rule it out unless it has both.
  */
-function eventAllowed(baseType: ItemType, hint: TimeHint | undefined, text: string): boolean {
+function eventAllowed(baseType: ItemType, hint: TimeHint | undefined, { booking, recap }: Scored): boolean {
   const dated = !!hint?.strong;
-  const booking = BOOKING_RE.test(text);
-  const recap = RECAP_RE.test(text);
   if (baseType === 'video') return (dated || booking) && (!recap || (dated && booking));
   return !recap || dated || booking;
 }
@@ -1230,10 +1489,11 @@ export function classify(input: SharedInput): Classification {
 
   const human = [parsed.title, parsed.note].filter(Boolean).join('\n');
   const text = [human, url ? safePath(url) : ''].filter(Boolean).join('\n');
-  const ev = scoreText(text);
+  const scored = scoreText(text);
+  const { ev } = scored;
   const hint = findTimeHint(human);
   const venue = applyTimeHint(ev, hint);
-  const eventOk = !OVERRIDABLE.has(baseType) || eventAllowed(baseType, hint, text);
+  const eventOk = !OVERRIDABLE.has(baseType) || eventAllowed(baseType, hint, scored);
   const blockedEvent = eventOk ? undefined : ev.get('event');
   // Still worth offering as a second guess, but not enough to make the base type look unsure.
   if (blockedEvent) ev.set('event', { ...blockedEvent, score: Math.min(blockedEvent.score, 2) });
@@ -1344,13 +1604,18 @@ function safePath(url: string): string {
  * compiles on its first runs, which takes a while for the big Unicode ones on a phone).
  */
 export function warmRegExps(): RegExp[] {
+  cjkTerms(); // not regexes, but built here too so the first analysis doesn't have to
   return [
     ...Object.values(keywordSignals()).flatMap((list) => (list ?? []).map((s) => s.re)),
     BOOKING_RE,
     RECAP_RE,
+    CJK_RUN_RE,
     ...STRONG_HINTS,
     ...WEAK_HINTS,
     RECURRING_BEFORE,
+    POSTED_BEFORE,
+    POSTED_AFTER,
+    IG_POST_PATH,
     URL_RE,
     URL_RE_ALL,
     IGNORED_HASHTAG_RE,

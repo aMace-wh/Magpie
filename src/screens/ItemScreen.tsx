@@ -146,10 +146,20 @@ export function ItemScreen({ id }: { id: string }) {
     try {
       // Someone's waiting: its place lookup goes ahead of background ones, and the spinner stops once
       // the preview is in (city / country fill in after).
-      const fetched = await enrichItem(item.id, { ...REFRESH_OPTIONS, priority: 'user', signal: ctrl.signal, waitForPlace: false });
+      let problem: string | undefined;
+      const fetched = await enrichItem(item.id, {
+        ...REFRESH_OPTIONS,
+        priority: 'user',
+        signal: ctrl.signal,
+        waitForPlace: false,
+        onProblem: (p) => (problem = p),
+      });
       if (ctrl.signal.aborted) return;
       if (fetched) toast('Preview updated');
-      else toast(navigator.onLine === false ? "You're offline — try again when you're back online." : "Couldn't fetch a preview right now.");
+      else if (navigator.onLine === false) toast("You're offline — try again when you're back online.");
+      else if (problem === 'limited') toast('The preview service has run out of requests for today — try again tomorrow.');
+      else if (problem === 'timeout') toast('The preview service is taking too long — try again in a bit.');
+      else toast("Couldn't fetch a preview right now.");
     } catch {
       if (!ctrl.signal.aborted) toast("Couldn't fetch a preview");
     } finally {

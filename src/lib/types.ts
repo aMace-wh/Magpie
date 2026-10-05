@@ -36,6 +36,11 @@ export interface When {
   source?: string;
 }
 
+/** Fields of a save the automatic analysis fills in, until the user sets them. */
+export type EditedField = 'title' | 'type' | 'when' | 'place' | 'tags';
+
+export const EDITED_FIELDS: readonly EditedField[] = ['title', 'type', 'when', 'place', 'tags'];
+
 /** Who shared an item or collection with you. */
 export interface SharedFrom {
   name?: string;
@@ -76,6 +81,14 @@ export interface Item {
   when?: When;
   /** Exactly what was shared or pasted, kept so you can recognise the original post. */
   sharedText?: string;
+  /** Who posted it, from the link preview: a display name or "@handle". */
+  author?: string;
+  /** Version of the text analysis (understand.ts) this save has had, so older saves get looked at again once. */
+  analyzed?: number;
+  /** What the user set or cleared by hand, which the analysis leaves as it is from then on. */
+  edited?: EditedField[];
+  /** The analysis found a place worth looking up and that's still to be done (a few run per launch). */
+  locatePending?: boolean;
   from?: SharedFrom;
   createdAt: number;
   updatedAt: number;
