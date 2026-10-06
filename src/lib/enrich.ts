@@ -373,6 +373,9 @@ export async function enrichItem(id: string, opts: EnrichOptions): Promise<boole
     // Changed while the preview loaded: planned again from what's there now.
     const plan = JSON.stringify(current) === JSON.stringify(before) ? ahead : planChanges(before, current, preview, opts, !!link);
     const { changes } = plan;
+    // Remember when the platform won't show the post (so the save can say why it's bare), and forget it once it does.
+    if (fetched && current.previewIssue) changes.previewIssue = undefined;
+    else if (!fetched && preview.problem === 'unavailable' && !current.previewIssue) changes.previewIssue = 'unavailable';
     if (Object.keys(changes).length) await db.items.update(id, versioned(changes));
     return { item: { ...current, ...changes }, plan };
   });

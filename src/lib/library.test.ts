@@ -169,6 +169,21 @@ describe('backups', () => {
   it('refuses files that are not backups', async () => {
     await expect(importBackup({ hello: 'world' })).rejects.toThrow(/backup/);
   });
+
+  it('keeps why a save is bare, but not once it has a preview, and never in a share', async () => {
+    const bare = await addItem({ type: 'video', title: 'Instagram reel', url: 'https://www.instagram.com/reel/AbC123/', source: 'instagram' });
+    const filled = await addItem({ type: 'video', title: 'Night market', url: 'https://www.instagram.com/reel/XyZ789/', source: 'instagram', siteName: 'Instagram' });
+    await db.items.update(bare.id, { previewIssue: 'unavailable' });
+    await db.items.update(filled.id, { previewIssue: 'unavailable' });
+    const backup = JSON.parse(JSON.stringify(await exportBackup()));
+    await db.items.clear();
+    await importBackup(backup);
+    expect((await db.items.get(bare.id))?.previewIssue).toBe('unavailable');
+    expect((await db.items.get(filled.id))?.previewIssue).toBeUndefined();
+    const shared = JSON.stringify(await decodeShare(await encodeShare(shareItem((await db.items.get(bare.id))!))));
+    expect(shared).toContain('AbC123');
+    expect(shared).not.toContain('unavailable');
+  });
 });
 
 // ---------------------------------------------------------------------------

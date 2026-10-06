@@ -158,6 +158,7 @@ export function ItemScreen({ id }: { id: string }) {
       if (fetched) toast('Preview updated');
       else if (navigator.onLine === false) toast("You're offline — try again when you're back online.");
       else if (problem === 'limited') toast('The preview service has run out of requests for today — try again tomorrow.');
+      else if (problem === 'unavailable') toast(`${sourceLabel(item.source) ?? 'The site'} isn't showing this post publicly — open it there to see it.`);
       else if (problem === 'timeout') toast('The preview service is taking too long — try again in a bit.');
       else toast("Couldn't fetch a preview right now.");
     } catch {
@@ -390,12 +391,25 @@ const WALLED: Record<string, string> = { instagram: 'Instagram', facebook: 'Face
 
 /** Says why a save from Instagram & co. came in bare, and what to do about it. */
 function WalledNote({ item }: { item: Item }) {
-  const platform = item.source ? WALLED[item.source] : undefined;
+  const unavailable = item.previewIssue === 'unavailable';
+  // Any platform can keep a post from the public (TikTok too); the login wall is Instagram's, Facebook's and Threads'.
+  const platform = item.source ? (WALLED[item.source] ?? (unavailable ? sourceLabel(item.source) : undefined)) : undefined;
   if (!platform) return null;
   // Anything beyond the link itself: a caption, a picture or a description from the page.
   const caption = (item.sharedText ?? '').replace(/https?:\/\/\S+/g, '').trim();
   if (item.image || item.description || caption || item.note) return null;
   const canEmbed = !!embedFor(item.url);
+  if (unavailable) {
+    return (
+      <p className="hint walled-note">
+        {platform} isn't showing this post publicly, so Magpie can't get its picture or caption. It may have been deleted or
+        made private, or {platform} only shows it to signed-in people or in some countries.{' '}
+        {canEmbed ? `Try “Load original post” above, or open it in ${platform}.` : `Open it in ${platform} to see it.`} To have
+        Magpie pick up the date and place, copy the caption in {platform} and paste it into Notes below. You can also add them
+        yourself.
+      </p>
+    );
+  }
   return (
     <p className="hint walled-note">
       {platform} doesn't let other apps read its posts, so Magpie couldn't get the picture, caption or location.{' '}

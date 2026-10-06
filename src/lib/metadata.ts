@@ -1,5 +1,6 @@
-import { analyzeTitle, hostOf, safeUrl, stripTracking, youtubeId } from './classify';
+import { analyzeTitle, classify, hostOf, safeUrl, stripTracking, youtubeId } from './classify';
 import { captionTitle, isBoilerplateTitle, isPostLink, parsePostDescription, parsePostTitle, type PostInfo } from './postText';
+import type { Item } from './types';
 
 /**
  * Link previews (title, image, description, author…). Browsers can't read other sites'
@@ -29,10 +30,12 @@ export interface LinkPreview {
   caption?: string;
   /**
    * Why nothing came back: 'limited' when the preview service's daily allowance is used up (HTTP 429),
-   * 'timeout' when it was too slow, 'failed' otherwise (errors, login walls, nothing found). Unset when the
+   * 'timeout' when it was too slow, 'unavailable' when the platform showed it an error page or sent it somewhere
+   * else (the account, the reel's audio, the home page) instead of the post — deleted, private, or only for some
+   * countries or signed-in people — and 'failed' otherwise (errors, login walls, nothing found). Unset when the
    * caller cancelled.
    */
-  problem?: 'limited' | 'timeout' | 'failed';
+  problem?: 'limited' | 'timeout' | 'unavailable' | 'failed';
 }
 
 type Problem = NonNullable<LinkPreview['problem']>;
@@ -55,7 +58,7 @@ class PreviewProblem extends Error {
   }
 }
 
-const PROBLEM_RANK: Record<Problem, number> = { failed: 0, timeout: 1, limited: 2 };
+const PROBLEM_RANK: Record<Problem, number> = { failed: 0, timeout: 1, unavailable: 2, limited: 3 };
 const worse = (a: Problem | undefined, b: Problem): Problem => (a && PROBLEM_RANK[a] >= PROBLEM_RANK[b] ? a : b);
 
 async function getJson(url: string, signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<unknown> {
@@ -160,6 +163,215 @@ async function fromNoembed(url: string, signal?: AbortSignal, timeoutMs?: number
 const WALL_DESCRIPTION_RE =
   /^(?:create an account or log in to instagram|log in to (?:see|view) (?:photos|this)|welcome back to instagram|log into facebook|facebook helps you connect|see posts, photos and more on facebook|join threads|log in with your instagram)/i;
 
+// The platform's "this isn't available" pages (deleted, private or restricted posts), in the languages it answers in.
+const UNAVAILABLE_PHRASES = [
+  String.raw`(?:sorry,?\s*)?this page (?:isn['’]?t|is not) available`,
+  String.raw`(?:sorry,?\s*)?(?:this\s+)?content (?:isn['’]?t|is not|is no longer|no longer|not) available`,
+  String.raw`(?:sorry,?\s*)?this (?:post|reel|video|account) (?:is (?:currently |no longer )?unavailable|isn['’]?t available|is (?:no longer|not) available)`,
+  String.raw`(?:sorry,?\s*)?(?:video|post|content|page) (?:is )?(?:currently )?unavailable`,
+  String.raw`(?:sorry,?\s*)?page not found`,
+  String.raw`the link you followed may be broken`,
+  String.raw`this account is private`,
+  String.raw`(?:很)?抱歉[，,、]?\s*(?:(?:此|這個|这个)(?:頁面|页面)(?:目前)?(?:無法使用|无法使用|無法存取|无法访问|無法顯示|无法显示|不存在|已不存在|不可用)|(?:無法使用|无法使用)(?:此|這個|这个)(?:頁面|页面))`,
+  String.raw`(?:此|這個|这个)(?:頁面|页面)(?:目前)?(?:無法使用|无法使用|無法存取|无法访问|無法顯示|无法显示|不存在|已不存在|不可用)`,
+  String.raw`找不到(?:此|這個|这个)?(?:頁面|页面|網頁|网页)`,
+  String.raw`(?:這|这)(?:個|个)(?:帳號|帐号|账号|账户|帳戶)(?:是|為|为)?私(?:人|密)(?:帳號|帐号|账号|账户|帳戶)?`,
+  'このページはご利用いただけません',
+  'ページが見つかりません',
+  'このアカウントは非公開です',
+  String.raw`(?:죄송합니다[.,]?\s*)?페이지를 사용할 수 없습니다`,
+  '비공개 계정입니다',
+];
+// What those pages go on to say: why, and the way back. Anything else after the phrase is someone's own words.
+const UNAVAILABLE_TAIL = [
+  'the link you followed',
+  'the page may',
+  'it may have been',
+  'it(?:\'|’)?s usually because',
+  'when this happens',
+  'this (?:may|might) be because',
+  '(?:go|return) (?:back )?to',
+  'follow (?:this account |them )?to see',
+  'learn more',
+  'you (?:can|may|might)',
+  '你',
+  '您',
+  '連結',
+  '链接',
+  '可能',
+  '返回',
+  '請',
+  '请',
+  'リンク',
+  'ページ',
+  'instagramに戻る',
+  '클릭',
+  '링크',
+  '페이지',
+  'instagram으로',
+].join('|');
+const UNAVAILABLE_RE = new RegExp(
+  String.raw`^\s*(?:${UNAVAILABLE_PHRASES.join('|')})` +
+    String.raw`(?:\s+(?:right now|at the moment|at this time|for now|in your (?:country|region)))?` +
+    String.raw`(?:\s*[•|·–—-]\s*(?:instagram|facebook|threads|tiktok))?` +
+    String.raw`[\s.!。！]*(?:(?:${UNAVAILABLE_TAIL})[^?？#＃@]{0,300})?$`,
+  'i',
+);
+
+/**
+ * The whole text is one of those pages' messages ("Sorry, this page isn't available. The link you followed may be
+ * broken…", "Page not found • Instagram"), not a caption that happens to start with the same words.
+ */
+const unavailableText = (s: string | undefined): boolean => !!s && s.length <= 500 && UNAVAILABLE_RE.test(s);
+
+// What an account's page or a reel's audio page says: a preview of those isn't a preview of the post.
+const PROFILE_TEXT_RE = new RegExp(
+  [
+    // "12K Followers, 300 Following, 1,234 Posts - …", and the same in Chinese, Japanese and Korean.
+    String.raw`^[\d.,]+\s*[kmb]?\s+followers?\s*,\s*[\d.,]+\s*[kmb]?\s+following\b`,
+    String.raw`^[\d.,]+\s*[萬万千億亿]?\s*位?(?:粉絲|粉丝)\s*[、,，]`,
+    String.raw`^フォロワー\s*[\d.,]+\s*[万千億]?\s*人`,
+    String.raw`^팔로워\s*[\d.,]+\s*[만천억]?\s*명`,
+    // "… - See Instagram photos and videos from Mei Chan (@mei.eats)"
+    String.raw`see instagram photos and videos from\b[^\n]{0,100}\(@[\w.]+\)`,
+    String.raw`\(@[\w.]+\)\s*的\s*instagram\s*(?:相片和影片|照片和视频|照片和影片)`,
+    String.raw`\(@[\w.]+\)\s*さんのinstagramの写真と動画`,
+    String.raw`\(@[\w.]+\)\s*님의\s*instagram\s*사진\s*및\s*동영상`,
+    // A reel's audio: "Watch 1,234 reels made with Original audio - chef"
+    String.raw`^watch [\d.,]+\s*[kmb]?\s+reels made with\b`,
+  ].join('|'),
+  'i',
+);
+
+// The audio's page is titled after it: "Original audio - chef".
+const AUDIO_TITLE_RE = /^original audio\b/i;
+
+/**
+ * The page of the account or of the reel's audio, not the post: their description (or an author made from it), or
+ * an audio's name for a title with nothing else to go on. The fetch and the clean-up of older saves both go by this.
+ */
+function notThePost(url: string, title: string | undefined, description: string | undefined, author?: string): boolean {
+  const text = description?.trim() ?? '';
+  if (PROFILE_TEXT_RE.test(text) || (!!author && PROFILE_TEXT_RE.test(author))) return true;
+  return onHost(hostOf(url), ['instagram.com']) && !!title && AUDIO_TITLE_RE.test(title.trim()) && (!text || isBoilerplateTitle(text));
+}
+
+/** The platform's own artwork (logo, default share picture): never a post's picture. */
+function platformAsset(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (u.pathname.includes('/rsrc.php/') || /^static\.(?:[\w-]+\.)?(?:cdninstagram\.com|fbcdn\.net)$/.test(host) || onHost(host, ['ttwstatic.com'])) return true;
+    return (onHost(host, ['instagram.com']) && /^\/static\//i.test(u.pathname)) || (onHost(host, ['facebook.com']) && /^\/images\//i.test(u.pathname));
+  } catch {
+    return false;
+  }
+}
+
+// Where a platform sends you to sign in or check you're human: a wall, not the post moving somewhere else.
+const WALL_PATH_RE = /^\/(?:accounts\/(?:login|signup)|login|signup|challenge|checkpoint|consent|privacy\/checks)(?:[/?.]|$)/i;
+// A share link ("instagram.com/share/reel/BAxyz…/"): its token isn't the post's code, and it redirects to the post.
+const SHARE_PATH_RE = /^\/share\//i;
+// One-segment paths that are a post or a video's page all the same ("facebook.com/watch?v=…", "/video.php?v=…").
+const POST_SEGMENT_RE = /^(?:watch|reels?|videos?|photos?|story|stories|permalink|groups|events|live|tv|p|posts?)$|\.php$/i;
+
+/** The code in an Instagram or Threads post link ("/reel/ABC123/", "/@chef/post/ABC123" → "ABC123"). */
+function postCode(url: string): string | undefined {
+  try {
+    const u = new URL(url);
+    if (!onHost(u.hostname.toLowerCase(), ['instagram.com', 'threads.net', 'threads.com']) || SHARE_PATH_RE.test(u.pathname)) return undefined;
+    return /\/(?:p|reels?|tv|post)\/([A-Za-z0-9_-]{5,})/.exec(u.pathname)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Asked about a post, the service ended up somewhere else on the same platform: the home page, an account, the reel's
+ * audio, another post. That's what the platform does when the post isn't public to it. Only plain signs count: a post
+ * reached under another path (a share link's real one, "/watch?v=…" for "/videos/…") is still the post.
+ */
+function landedElsewhere(url: string, finalUrl: string | undefined): boolean {
+  if (!finalUrl) return false;
+  let from: URL;
+  let to: URL;
+  try {
+    from = new URL(url);
+    to = new URL(finalUrl);
+  } catch {
+    return false;
+  }
+  if (!askedForPost(url)) return false;
+  const family = (host: string) => SOCIAL_HOSTS.find((h) => onHost(host.toLowerCase(), [h]))?.replace(/^fb\.watch$/, 'facebook.com');
+  if (!family(to.hostname) || family(to.hostname) !== family(from.hostname) || WALL_PATH_RE.test(to.pathname)) return false;
+  // The reel's audio, or a sound's page.
+  if (/^\/(?:reels\/audio|music)\//i.test(to.pathname)) return true;
+  const segments = to.pathname.split('/').filter(Boolean);
+  // The home page, or an account's ("instagram.com/chef/", "tiktok.com/@chef", "facebook.com/profile.php?id=…").
+  if (!segments.length) return true;
+  if (segments.length === 1) return /^profile\.php$/i.test(segments[0]) || !POST_SEGMENT_RE.test(segments[0]);
+  const [a, b] = [postCode(url), postCode(finalUrl)];
+  return !!a && !!b && a !== b;
+}
+
+/** A link to a post, or a share link that leads to one. */
+function askedForPost(url: string): boolean {
+  try {
+    return !!postKindFromUrl(url) || SHARE_PATH_RE.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** A link to a post on Instagram, Facebook, Threads or TikTok. */
+export function isSocialPostLink(url: string | undefined): boolean {
+  // Most saves are elsewhere: a quick look before parsing.
+  if (!url || !/instagram\.com|facebook\.com|fb\.watch|threads\.(?:net|com)|tiktok\.com/i.test(url)) return false;
+  const safe = safeUrl(url);
+  return !!safe && onHost(hostOf(safe), SOCIAL_HOSTS) && !!postKindFromUrl(safe);
+}
+
+// "Reel by Mei Chan": made from the account's name when there's no caption.
+const BY_TITLE_RE = /^(?:reel|photo|video|post) by \S/i;
+
+/**
+ * Saves made before Magpie knew the signs: what their stored preview got from an error page, the platform's logo,
+ * or the account's or audio's page instead of the post. Returns the fields to clear (so the preview is asked for
+ * again), or undefined when it looks fine. Only for social post links; never the title the user typed.
+ */
+export function badPreviewFields(
+  item: Pick<Item, 'url' | 'title' | 'image' | 'description' | 'siteName' | 'author' | 'edited'>,
+): Partial<Item> | undefined {
+  if (!isSocialPostLink(item.url)) return undefined;
+  const url = safeUrl(item.url)!;
+  const description = item.description?.trim() ?? '';
+  const typedTitle = !!item.edited?.includes('title');
+  const elsewhere = notThePost(url, typedTitle ? undefined : item.title, description, item.author);
+  // An error page's message, a login wall's (which names nobody), or just the platform's name.
+  const errorText =
+    !!description && (unavailableText(description) || (WALL_DESCRIPTION_RE.test(description) && !item.author) || isBoilerplateTitle(description));
+  const errorTitle = !typedTitle && unavailableText(item.title);
+  const badImage = platformAsset(item.image);
+  if (!elsewhere && !errorText && !errorTitle && !badImage) return undefined;
+  const out: Partial<Item> = {};
+  // The account's picture or the audio's cover came with that page, and so did anything it said.
+  if (badImage || (elsewhere && item.image)) out.image = undefined;
+  if (description && (elsewhere || errorText || errorTitle)) out.description = undefined;
+  // With no picture or text left, the site name would stop the preview from being asked for again.
+  const imageLeft = 'image' in out ? undefined : item.image;
+  const descriptionLeft = 'description' in out ? undefined : description;
+  if (item.siteName && !imageLeft && !descriptionLeft) out.siteName = undefined;
+  // That page's name for the post ("Reel by <account>", "Original audio - chef", "Page not found") and its account
+  // go too, so the post's own caption title and author can take their place.
+  if (elsewhere && item.author) out.author = undefined;
+  const pageTitle =
+    errorTitle || (elsewhere && (BY_TITLE_RE.test(item.title) || AUDIO_TITLE_RE.test(item.title) || item.title === item.author || isBoilerplateTitle(item.title)));
+  const linkTitle = classify({ url }).title;
+  if (!typedTitle && pageTitle && item.title !== linkTitle) out.title = linkTitle;
+  return out;
+}
+
 const KIND_WORDS: Record<NonNullable<PostInfo['kind']>, string> = { reel: 'Reel', photo: 'Photo', video: 'Video', post: 'Post' };
 
 /** What kind of post a link is, from its path: instagram.com/reel/…, /p/…, /tv/…. */
@@ -190,9 +402,11 @@ function withPost(p: LinkPreview, rawTitle: unknown, rawDescription: unknown, ur
   const fromTitle = post && title ? parsePostTitle(title) : undefined;
   const handle = fromText?.handle ?? fromTitle?.handle;
   const name = fromTitle?.author ?? fromText?.author;
-  // A login wall: just the platform's name, nothing about the post or who posted it.
-  if (onHost(host, SOCIAL_HOSTS) && isBoilerplateTitle(title) && !handle && !name && (!description || WALL_DESCRIPTION_RE.test(description))) {
-    return undefined;
+  if (onHost(host, SOCIAL_HOSTS) && !handle && !name) {
+    // "Sorry, this page isn't available" as the title, or under just the platform's name: deleted or not public.
+    if (unavailableText(title) || ((!title || isBoilerplateTitle(title)) && unavailableText(description))) throw new PreviewProblem('unavailable');
+    // A login wall: just the platform's name, nothing about the post or who posted it.
+    if (isBoilerplateTitle(title) && (!description || WALL_DESCRIPTION_RE.test(description) || isBoilerplateTitle(description))) return undefined;
   }
   if (!fromText && !fromTitle) return p;
 
@@ -245,13 +459,21 @@ async function fromMicrolink(url: string, signal?: AbortSignal, timeoutMs?: numb
   }
   const d = res.data;
   const imageUrl = (v: unknown) => (v && typeof v === 'object' ? safeUrl((v as { url?: unknown }).url) : undefined);
+  const social = onHost(hostOf(url), SOCIAL_HOSTS);
+  // Sent to the account, the audio or the home page instead, or given their page under the post's own link: not a
+  // preview of this post (the clean-up of older saves goes by the same signs).
+  if (social && askedForPost(url) && (landedElsewhere(url, safeUrl(d.url)) || notThePost(url, clean(d.title), clean(d.description, 500)))) {
+    throw new PreviewProblem('unavailable');
+  }
   const t = titleFields(d.title);
+  const image = imageUrl(d.image);
   return withPost(
     {
       title: t.title,
       rawTitle: t.rawTitle,
       description: clean(d.description, 500),
-      image: imageUrl(d.image) ?? imageUrl(d.logo),
+      // A social post's picture is its own: never the platform's logo or default artwork.
+      image: social ? (platformAsset(image) ? undefined : image) : image ?? imageUrl(d.logo),
       siteName: clean(d.publisher, 60),
       finalUrl: safeUrl(d.url),
       author: clean(d.author, 80) ?? t.author,
@@ -360,6 +582,20 @@ export async function fetchPreview(url: string, signal?: AbortSignal, opts: Fetc
       const why = e instanceof PreviewProblem ? e.problem : 'failed';
       if (why === 'limited' && attempt === fromMicrolink) noteLimited();
       problem = worse(problem, why);
+    }
+  }
+  // The platform wouldn't show the post at its plain link. It may still show it with the link as it was shared (a
+  // share token such as Instagram's ?stkn= may be what opens it to people who aren't signed in): asked once more that
+  // way. Only then, so the token goes to the service only for a post it can't see otherwise.
+  const shared = safeUrl(url);
+  if (!answered && problem === 'unavailable' && shared && shared !== target && attempts.includes(fromMicrolink) && !signal?.aborted) {
+    try {
+      const p = await fromMicrolink(shared, signal, timeout);
+      if (p && Object.values(p).some(Boolean)) answered = true;
+      merge(p);
+    } catch (e) {
+      // Still not public; the reason stays "unavailable" whatever this second try ran into.
+      if (e instanceof PreviewProblem && e.problem === 'limited') noteLimited();
     }
   }
   if (!preview.rawTitle) delete preview.rawTitle;

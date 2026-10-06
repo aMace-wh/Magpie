@@ -3,9 +3,9 @@ import { db } from './db';
 import { enrichItem, locateSaved, type EnrichOptions } from './enrich';
 import { backgroundSignal, geoHealth, lookupReport, whenUserIdle } from './geo';
 import { mergePlaceDetails, needsDetails, resolvePlaceDetails } from './location';
-import { previewsLimitedUntil } from './metadata';
+import { badPreviewFields, isSocialPostLink, previewsLimitedUntil } from './metadata';
 import { getSettings } from './settings';
-import { brokenImageIds, clearBrokenImage } from './thumbs';
+import { brokenImageIds, clearBrokenImage, deleteThumbs } from './thumbs';
 import type { Item } from './types';
 import { analyzeSave, ANALYSIS_VERSION, reanalysisChanges, storedPreview, wantsLookup } from './understand';
 import { whenIdle, whenWarm, type IdleDeadlineLike } from './warmup';
@@ -345,6 +345,64 @@ async function retry(missing: number, pictures: number): Promise<number> {
   return got;
 }
 
+/** Bumped when the preview fetch learns new signs: bare posts it had given up on are then asked again, once. */
+const FRESH_LOOK_VERSION = 1;
+const FRESH_LOOK_KEY = 'magpie:preview-fresh-look';
+/** A cleared picture's kept copy goes once the cards have the cleaned save: any sooner, a card loads the old picture. */
+const DROP_COPIES_AFTER_MS = 2000;
+
+/**
+ * Clears what earlier versions (or a backup or share made with one) kept from an error page, the platform's logo, or
+ * the account's or audio's page instead of the post (see badPreviewFields), and puts those saves first in line for a
+ * fresh preview. Looks a few saves per idle moment, at every start-up. Resolves to the number of saves cleaned up.
+ */
+export async function cleanBadPreviews(): Promise<number> {
+  const items = await db.items.toArray();
+  const ids: string[] = [];
+  for (let i = 0; i < items.length; ) {
+    const deadline = await nextIdle();
+    do {
+      if (badPreviewFields(items[i])) ids.push(items[i].id);
+      i++;
+    } while (i < items.length && deadline.timeRemaining() > 6);
+  }
+  const cleaned: string[] = [];
+  const pictures: string[] = [];
+  if (ids.length) {
+    await db.transaction('rw', db.items, async () => {
+      for (const id of ids) {
+        // Read again inside the transaction: it may have changed since.
+        const current = await db.items.get(id);
+        const fix = current && badPreviewFields(current);
+        if (!fix) continue;
+        await db.items.update(id, { ...fix, updatedAt: Date.now() });
+        cleaned.push(id);
+        if ('image' in fix) pictures.push(id);
+      }
+    });
+  }
+  if (pictures.length) {
+    pictures.forEach(clearBrokenImage);
+    setTimeout(() => {
+      void (async () => {
+        const [now, copies] = await Promise.all([db.items.bulkGet(pictures), db.thumbs.bulkGet(pictures)]);
+        // Only copies of the old picture: a card falls back on one when its link stops working. A copy of a picture
+        // that came back meanwhile stays.
+        await deleteThumbs(pictures.filter((_, k) => copies[k] && copies[k].src !== now[k]?.image));
+      })().catch(() => undefined);
+    }, DROP_COPIES_AFTER_MS);
+  }
+  const tries = readJson<Tries>(TRIES_KEY, {});
+  for (const id of cleaned) delete tries[id];
+  // Bare posts given up on before the fetch knew these signs get one more try (and say why if it's still no).
+  if (readJson<{ v?: number }>(FRESH_LOOK_KEY, {}).v !== FRESH_LOOK_VERSION) {
+    for (const item of items) if (tries[item.id] && bare(item) && isSocialPostLink(item.url)) delete tries[item.id];
+    writeJson(FRESH_LOOK_KEY, { v: FRESH_LOOK_VERSION });
+  }
+  writeJson(TRIES_KEY, tries);
+  return cleaned.length;
+}
+
 /** Drops entries that have used up their tries long ago, so the list can't grow forever. */
 function pruneTries(tries: Tries): Tries {
   const old = Date.now() - 30 * 86400000;
@@ -355,12 +413,14 @@ function pruneTries(tries: Tries): Tries {
 // ---------------------------------------------------------------------------
 
 /**
- * The background work after start-up, one pass after another: older saves looked at again (and a few located),
- * missing place details, then previews that never came and pictures that stopped working. Never throws.
+ * The background work after start-up, one pass after another: wrong previews cleared, older saves looked at again
+ * (and a few located), missing place details, then previews that never came and pictures that stopped working.
+ * Never throws.
  */
 export async function backgroundWork(): Promise<void> {
   // The analysis compiles its patterns in the start-up warm-up's idle slices: not all at once here.
   await Promise.race([whenWarm(), new Promise((resolve) => setTimeout(resolve, 30_000))]);
+  await cleanBadPreviews().catch(() => 0);
   await reanalyzeSaves().catch(() => 0);
   await backfillPlaceDetails().catch(() => 0);
   await retryPreviews().catch(() => 0);

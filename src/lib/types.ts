@@ -89,6 +89,8 @@ export interface Item {
   edited?: EditedField[];
   /** The analysis found a place worth looking up and that's still to be done (a few run per launch). */
   locatePending?: boolean;
+  /** The platform showed the preview service an error page or sent it elsewhere: the post isn't public to it. */
+  previewIssue?: 'unavailable';
   from?: SharedFrom;
   createdAt: number;
   updatedAt: number;

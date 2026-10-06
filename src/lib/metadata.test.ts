@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchPreview, previewsLimitedUntil, resetPreviewLimit } from './metadata';
+import { badPreviewFields, fetchPreview, previewsLimitedUntil, resetPreviewLimit } from './metadata';
 
 type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
@@ -367,6 +367,172 @@ describe('fetchPreview', () => {
     expect(await fetchPreview('https://www.instagram.com/reel/AbC123/')).toEqual({ problem: 'failed' });
   });
 
+  it("says when the platform won't show a post publicly", async () => {
+    const reel = 'https://www.instagram.com/reel/AbC123/';
+    const logo = { url: 'https://static.cdninstagram.com/rsrc.php/v4/yG/r/logo.png' };
+    // Its "isn't available" page, in English or Chinese, with or without the logo.
+    mockFetch(() =>
+      json({ status: 'success', data: { title: 'Instagram', description: "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.", logo, url: reel } }),
+    );
+    expect(await fetchPreview(reel)).toEqual({ problem: 'unavailable' });
+    mockFetch(() => json({ status: 'success', data: { title: 'Page not found • Instagram', url: reel } }));
+    expect(await fetchPreview(reel)).toEqual({ problem: 'unavailable' });
+    mockFetch(() => json({ status: 'success', data: { title: 'Instagram', description: '抱歉，此頁面無法使用。', url: reel } }));
+    expect(await fetchPreview(reel)).toEqual({ problem: 'unavailable' });
+    // Sent to the account, the reel's audio, the home page or another post instead.
+    for (const url of ['https://www.instagram.com/mei.eats/', 'https://www.instagram.com/reels/audio/123456/', 'https://www.instagram.com/', 'https://www.instagram.com/p/ZzZ999/']) {
+      mockFetch(() =>
+        json({
+          status: 'success',
+          data: { title: 'Mei Chan (@mei.eats) • Instagram photos and videos', description: '1,234 Followers, 56 Following, 78 Posts - See Instagram photos and videos from Mei Chan (@mei.eats)', image: { url: 'https://scontent.cdninstagram.com/v/pfp.jpg' }, url },
+        }),
+      );
+      expect(await fetchPreview(reel)).toEqual({ problem: 'unavailable' });
+    }
+    // A sign-in page is a wall in the way, not a missing post.
+    mockFetch(() =>
+      json({ status: 'success', data: { title: 'Instagram', description: 'Create an account or log in to Instagram - Share what you’re into with the people who get you.', url: 'https://www.instagram.com/accounts/login/?next=%2Freel%2FAbC123%2F' } }),
+    );
+    expect(await fetchPreview(reel)).toEqual({ problem: 'failed' });
+    // A bare "Instagram" with only the platform's name for a description is nothing too.
+    mockFetch(() => json({ status: 'success', data: { title: 'Instagram', description: 'Instagram', logo, url: reel } }));
+    expect(await fetchPreview(reel)).toEqual({ problem: 'failed' });
+  });
+
+  it('keeps a post that comes back under its other path', async () => {
+    mockFetch(() =>
+      json({
+        status: 'success',
+        data: { title: 'Mei Chan (@mei.eats) • Instagram reel', description: '1,204 likes, 33 comments - mei.eats on September 12, 2026: “Night market crawl”.', url: 'https://www.instagram.com/p/AbC123/' },
+      }),
+    );
+    const p = await fetchPreview('https://www.instagram.com/reel/AbC123/');
+    expect(p.problem).toBeUndefined();
+    expect(p.title).toBe('Night market crawl');
+  });
+
+  it("spots the account's or audio's page even under the post's own link, or with no link at all", async () => {
+    const reel = 'https://www.instagram.com/reel/AbC123/';
+    const pages = [
+      { title: 'Mei Chan (@mei.eats) • Instagram photos and videos', description: '12K Followers, 300 Following, 1,234 Posts - See Instagram photos and videos from Mei Chan (@mei.eats)' },
+      { title: 'Mei Chan (@mei.eats) • Instagram 相片和影片', description: '1.2萬 位粉絲、300 人追蹤中、1,234 則貼文 - 查看 Mei Chan (@mei.eats) 的 Instagram 相片和影片' },
+      { title: 'Mei Chan (@mei.eats) • Instagram photos and videos', description: '12K Followers, 300 Following, 1,234 Posts - Mei Chan (@mei.eats) on Instagram: "Eating my way around Taipei"' },
+      { title: 'Original audio - mei.eats | Instagram', description: 'Watch 1,234 reels made with Original audio - mei.eats' },
+      { title: 'Original audio - mei.eats | Instagram' },
+    ];
+    for (const page of pages) {
+      for (const url of [reel, undefined]) {
+        mockFetch(() => json({ status: 'success', data: { ...page, image: { url: 'https://scontent.cdninstagram.com/v/pfp.jpg' }, publisher: 'Instagram', url } }));
+        expect(await fetchPreview(reel), `${page.description ?? page.title} at ${url}`).toEqual({ problem: 'unavailable' });
+      }
+    }
+    // A caption that mentions followers is still a caption.
+    mockFetch(() =>
+      json({
+        status: 'success',
+        data: { title: 'Mei Chan (@mei.eats) • Instagram reel', description: '1,204 likes, 33 comments - mei.eats on September 12, 2026: “Thanks for 10K followers! See Instagram photos and videos from our trip”.', url: reel },
+      }),
+    );
+    expect((await fetchPreview(reel)).problem).toBeUndefined();
+  });
+
+  it('follows share links to their post, and still spots a share link that lands on an account', async () => {
+    const post = (url: string) => ({
+      status: 'success',
+      data: { title: 'Mei Chan (@mei.eats) • Instagram reel', description: '1,204 likes, 33 comments - mei.eats on September 12, 2026: “Night market crawl”.', url },
+    });
+    mockFetch(() => json(post('https://www.instagram.com/reel/DAbcdEFGhij/')));
+    const reel = await fetchPreview('https://www.instagram.com/share/reel/BAxyz12345/');
+    expect(reel.problem).toBeUndefined();
+    expect(reel.finalUrl).toBe('https://www.instagram.com/reel/DAbcdEFGhij/');
+    mockFetch(() => json(post('https://www.instagram.com/p/DAbcdEFGhij/')));
+    expect((await fetchPreview('https://www.instagram.com/share/p/BAxyz12345/')).problem).toBeUndefined();
+    mockFetch(() => json(post('https://www.instagram.com/mei.eats/')));
+    expect((await fetchPreview('https://www.instagram.com/share/reel/BAxyz12345/')).problem).toBe('unavailable');
+  });
+
+  it("keeps Facebook posts that come back under another of their paths, and spots an account's page", async () => {
+    const answer = (url: string) => () =>
+      json({ status: 'success', data: { title: 'Night market crawl | Mei Chan', description: 'Night market crawl with friends', image: { url: 'https://scontent.xx.fbcdn.net/v/x.jpg' }, url } });
+    for (const [from, to] of [
+      ['https://www.facebook.com/mei/videos/123456/', 'https://www.facebook.com/video.php?v=123456'],
+      ['https://www.facebook.com/watch/?v=123456', 'https://www.facebook.com/watch?v=123456'],
+      ['https://www.facebook.com/mei/videos/123456/', 'https://www.facebook.com/watch/?v=123456'],
+      ['https://www.facebook.com/photo/?fbid=123', 'https://www.facebook.com/photo.php?fbid=123'],
+      ['https://www.facebook.com/reel/123456', 'https://www.facebook.com/mei/videos/123456/'],
+      ['https://m.facebook.com/story.php?story_fbid=1&id=2', 'https://www.facebook.com/mei/posts/1'],
+    ]) {
+      mockFetch(answer(to));
+      expect((await fetchPreview(from)).problem, `${from} → ${to}`).toBeUndefined();
+    }
+    for (const to of ['https://www.facebook.com/mei', 'https://www.facebook.com/profile.php?id=42', 'https://www.facebook.com/']) {
+      mockFetch(answer(to));
+      expect((await fetchPreview('https://www.facebook.com/mei/videos/123456/')).problem, to).toBe('unavailable');
+    }
+  });
+
+  it('takes a caption that starts like an error page for a caption', async () => {
+    const answers = [
+      // A Facebook group post, title and all.
+      { title: 'This video is unavailable in my country lol, anyone have a mirror?', description: 'This video is unavailable in my country lol, anyone have a mirror?', publisher: 'Facebook', url: 'https://www.facebook.com/groups/1/posts/2/' },
+      // Under just the platform's name.
+      { title: 'Facebook', description: 'Page not found. Found this café instead', publisher: 'Facebook', url: 'https://www.facebook.com/groups/1/posts/2/' },
+    ];
+    for (const data of answers) {
+      mockFetch(() => json({ status: 'success', data }));
+      const p = await fetchPreview('https://www.facebook.com/groups/1/posts/2/');
+      expect(p.problem).toBeUndefined();
+      expect(p.description).toBe(data.description);
+    }
+    mockFetch(() =>
+      json({ status: 'success', data: { title: 'Page not found? Try this hidden café | TikTok', author: 'mei', image: { url: 'https://p16-sign.tiktokcdn.com/x.jpg' }, url: 'https://www.tiktok.com/@mei/video/7300000000000000000' } }),
+    );
+    expect((await fetchPreview('https://www.tiktok.com/@mei/video/7300000000000000000')).problem).toBeUndefined();
+  });
+
+  it('asks once more with the link as shared when the plain one is not public', async () => {
+    const shared = 'https://www.instagram.com/reel/AbC123/?stkn=abc123';
+    const sorry = json({ status: 'success', data: { title: 'Instagram', description: "Sorry, this page isn't available.", url: 'https://www.instagram.com/reel/AbC123/' } });
+    const caption = '1,204 likes, 33 comments - mei.eats on September 12, 2026: “Night market crawl”.';
+    const fetch = mockFetch((url) =>
+      decodeURIComponent(url).includes('stkn=abc123')
+        ? json({ status: 'success', data: { title: 'Mei Chan (@mei.eats) • Instagram reel', description: caption, url: shared } })
+        : sorry.clone(),
+    );
+    const p = await fetchPreview(shared);
+    expect(p.problem).toBeUndefined();
+    expect(p.title).toBe('Night market crawl');
+    expect(fetch.mock.calls.map(([u]) => decodeURIComponent(String(u)))).toEqual([
+      'https://api.microlink.io/?url=https://www.instagram.com/reel/AbC123/',
+      `https://api.microlink.io/?url=${shared}`,
+    ]);
+    // Still not public, or out of requests the second time: it stays "unavailable". Only once, and never for a plain link.
+    for (const second of [sorry, json({ status: 'fail', code: 'ERATE' }, 429)]) {
+      const calls = mockFetch((url) => (decodeURIComponent(url).includes('stkn=') ? second.clone() : sorry.clone()));
+      expect(await fetchPreview(shared)).toEqual({ problem: 'unavailable' });
+      expect(calls).toHaveBeenCalledTimes(2);
+      resetPreviewLimit();
+    }
+    const plain = mockFetch(() => sorry.clone());
+    expect(await fetchPreview('https://www.instagram.com/reel/AbC123/')).toEqual({ problem: 'unavailable' });
+    expect(plain).toHaveBeenCalledTimes(1);
+    // A login wall isn't asked again: that's most Instagram answers, and the allowance is small.
+    const wall = mockFetch(() => json({ status: 'success', data: { title: 'Instagram', description: 'Create an account or log in to Instagram', url: 'https://www.instagram.com/accounts/login/' } }));
+    expect(await fetchPreview(shared)).toEqual({ problem: 'failed' });
+    expect(wall).toHaveBeenCalledTimes(1);
+  });
+
+  it("never uses the platform's logo as a post's picture", async () => {
+    const caption = '1,204 likes, 33 comments - mei.eats on September 12, 2026: “Night market crawl”.';
+    mockFetch(() => json({ status: 'success', data: { title: 'Mei Chan (@mei.eats) • Instagram reel', description: caption, logo: { url: 'https://static.cdninstagram.com/rsrc.php/v4/logo.png' } } }));
+    expect((await fetchPreview('https://www.instagram.com/reel/AbC123/')).image).toBeUndefined();
+    mockFetch(() => json({ status: 'success', data: { title: 'Mei Chan (@mei.eats) • Instagram reel', description: caption, image: { url: 'https://static.xx.fbcdn.net/rsrc.php/v3/share.png' } } }));
+    expect((await fetchPreview('https://www.instagram.com/reel/AbC123/')).image).toBeUndefined();
+    // Other sites still fall back to their logo.
+    mockFetch(() => json({ status: 'success', data: { title: 'Pasta night', logo: { url: 'https://example.com/logo.png' } } }));
+    expect((await fetchPreview('https://example.com/pasta')).image).toBe('https://example.com/logo.png');
+  });
+
   it('reads Threads and Facebook posts', async () => {
     mockFetch(() =>
       json({ status: 'success', data: { title: 'Mei Chan (@mei.eats) on Threads', description: 'Where are the best egg tarts in town?\nAsking for a friend' } }),
@@ -388,5 +554,59 @@ describe('fetchPreview', () => {
     expect(await fetchPreview('geo:51.5,-0.12')).toEqual({});
     expect(await fetchPreview('javascript:alert(1)')).toEqual({});
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('badPreviewFields', () => {
+  const reel = 'https://www.instagram.com/reel/AbC123/';
+  const keys = (o: object | undefined) => (o ? Object.keys(o).sort() : o);
+
+  it("clears what an error page and the platform's logo left on a post", () => {
+    const fix = badPreviewFields({ url: reel, title: 'Instagram reel', image: 'https://static.cdninstagram.com/rsrc.php/v4/logo.png', description: "Sorry, this page isn't available.", siteName: 'Instagram' });
+    expect(keys(fix)).toEqual(['description', 'image', 'siteName']);
+    // The error page's title too, and the logo wherever it's served from.
+    const notFound = badPreviewFields({ url: reel, title: 'Page not found', image: 'https://www.instagram.com/static/images/ico/favicon-200.png/ab6eff595bb1.png', siteName: 'Instagram' });
+    expect(notFound).toEqual({ image: undefined, siteName: undefined, title: 'Instagram reel' });
+    expect(keys(badPreviewFields({ url: 'https://www.facebook.com/mei/videos/123/', title: 'Facebook video', image: 'https://www.facebook.com/images/fb_icon_325x325.png' }))).toEqual(['image']);
+  });
+
+  it("clears an account's or audio's page, with the title and author it gave the post", () => {
+    const profile = { url: reel, title: 'Reel by Mei Chan', author: 'Mei Chan', image: 'https://scontent.cdninstagram.com/v/pfp.jpg', description: '1,234 Followers, 56 Following, 78 Posts - See Instagram photos and videos from Mei Chan (@mei.eats)', siteName: 'Instagram' };
+    expect(badPreviewFields(profile)).toEqual({ image: undefined, description: undefined, siteName: undefined, author: undefined, title: 'Instagram reel' });
+    const zh = { ...profile, description: '1.2萬 位粉絲、300 人追蹤中、1,234 則貼文 - 查看 Mei Chan (@mei.eats) 的 Instagram 相片和影片' };
+    expect(keys(badPreviewFields(zh))).toEqual(['author', 'description', 'image', 'siteName', 'title']);
+    const audio = { url: reel, title: 'Original audio - mei.eats', image: 'https://scontent.cdninstagram.com/v/cover.jpg', description: 'Watch 1,234 reels made with Original audio - mei.eats', siteName: 'Instagram' };
+    const fix = badPreviewFields(audio);
+    expect(keys(fix)).toEqual(['description', 'image', 'siteName', 'title']);
+    expect(fix?.title).toBe('Instagram reel');
+    // The audio's page with nothing but its name.
+    expect(keys(badPreviewFields({ url: reel, title: 'Original audio - mei.eats', image: 'https://scontent.cdninstagram.com/v/cover.jpg', siteName: 'Instagram' }))).toEqual(['image', 'siteName', 'title']);
+    // A title the user typed stays.
+    expect(keys(badPreviewFields({ ...audio, edited: ['title'] }))).toEqual(['description', 'image', 'siteName']);
+    expect(keys(badPreviewFields({ ...profile, title: 'Mei’s ramen spot', edited: ['title'] }))).toEqual(['author', 'description', 'image', 'siteName']);
+  });
+
+  it('only drops a logo when the caption is fine, and leaves good saves and other sites alone', () => {
+    const caption = { url: reel, title: 'Night market crawl', image: 'https://static.cdninstagram.com/rsrc.php/v4/logo.png', description: 'Night market crawl', siteName: 'Instagram' };
+    expect(keys(badPreviewFields(caption))).toEqual(['image']);
+    expect(badPreviewFields({ ...caption, image: 'https://scontent.cdninstagram.com/v/x.jpg' })).toBeUndefined();
+    expect(badPreviewFields({ url: 'https://example.com/post/1', title: 'Gone', description: "Sorry, this page isn't available." })).toBeUndefined();
+    // An account's page saved on purpose is what it is.
+    expect(badPreviewFields({ url: 'https://www.instagram.com/mei.eats/', title: 'Mei Chan', description: '1,234 Followers - See Instagram photos and videos from Mei Chan' })).toBeUndefined();
+  });
+
+  it('keeps a caption that starts like an error page or mentions followers', () => {
+    const good = { url: reel, image: 'https://scontent.cdninstagram.com/v/x.jpg', siteName: 'Instagram', author: 'Mei Chan' };
+    for (const description of [
+      'Page not found? Try this hidden café in Taipei #taipei',
+      'This account is private, DM for collabs',
+      'Content not available anywhere else: our secret menu',
+      'This video is unavailable in my country lol, anyone have a mirror?',
+      'Thanks for 10K followers! See Instagram photos and videos from our trip below',
+    ]) {
+      expect(badPreviewFields({ ...good, title: description.slice(0, 30), description }), description).toBeUndefined();
+      // Even with no picture or author.
+      expect(badPreviewFields({ url: reel, title: description.slice(0, 30), description }), description).toBeUndefined();
+    }
   });
 });

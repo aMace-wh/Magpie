@@ -441,6 +441,21 @@ describe('enrichItem: other sites', () => {
   });
 });
 
+describe('enrichItem: posts that aren\'t public', () => {
+  it('remembers when the platform won\'t show the post, and forgets once it does', async () => {
+    const item = await save({ type: 'video', title: 'Instagram reel', url: 'https://www.instagram.com/reel/AbC123/', source: 'instagram' });
+    preview.mockResolvedValue({ problem: 'unavailable' });
+    expect(await enrichItem(item.id, REFRESH_OPTIONS)).toBe(false);
+    expect((await get(item.id)).previewIssue).toBe('unavailable');
+    preview.mockResolvedValue({ problem: 'timeout' });
+    await enrichItem(item.id, REFRESH_OPTIONS);
+    expect((await get(item.id)).previewIssue).toBe('unavailable');
+    preview.mockResolvedValue({ title: 'Night market crawl', description: 'Night market crawl', siteName: 'Instagram' });
+    expect(await enrichItem(item.id, REFRESH_OPTIONS)).toBe(true);
+    expect((await get(item.id)).previewIssue).toBeUndefined();
+  });
+});
+
 describe('enrichItem: refresh preview', () => {
   it('brings back neither a date nor a place the user removed', async () => {
     const { label } = futureDate();

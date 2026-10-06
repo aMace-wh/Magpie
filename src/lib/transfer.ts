@@ -702,6 +702,8 @@ export async function importBackup(raw: unknown): Promise<{ items: number; colle
       const edited = Array.isArray(i.edited) ? EDITED_FIELDS.filter((f) => i.edited!.includes(f)) : [];
       if (edited.length) item.edited = edited;
       if (i.locatePending === true && !item.place) item.locatePending = true;
+      // Why a save is still bare (the platform won't show the post), so it says so straight away.
+      if (i.previewIssue === 'unavailable' && !item.image && !item.description && !item.siteName) item.previewIssue = 'unavailable';
       return item;
     });
   await db.transaction('rw', db.items, db.collections, async () => {
