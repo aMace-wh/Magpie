@@ -324,6 +324,13 @@ function askedForPost(url: string): boolean {
   }
 }
 
+/** The post's own code standing in for a title ("Dd8tDDNKhSA"): what Instagram's page title can be when it has nothing else. */
+function isPostCodeTitle(title: string | undefined, url: string | undefined): boolean {
+  const t = title?.trim();
+  const code = t && url ? postCode(url) : undefined;
+  return !!code && t!.toLowerCase() === code.toLowerCase();
+}
+
 /** A link to a post on Instagram, Facebook, Threads or TikTok. */
 export function isSocialPostLink(url: string | undefined): boolean {
   // Most saves are elsewhere: a quick look before parsing.
@@ -353,7 +360,9 @@ export function badPreviewFields(
     !!description && (unavailableText(description) || (WALL_DESCRIPTION_RE.test(description) && !item.author) || isBoilerplateTitle(description));
   const errorTitle = !typedTitle && unavailableText(item.title);
   const badImage = platformAsset(item.image);
-  if (!elsewhere && !errorText && !errorTitle && !badImage) return undefined;
+  // An earlier version kept the post's code as its title.
+  const codeTitle = !typedTitle && isPostCodeTitle(item.title, url);
+  if (!elsewhere && !errorText && !errorTitle && !badImage && !codeTitle) return undefined;
   const out: Partial<Item> = {};
   // The account's picture or the audio's cover came with that page, and so did anything it said.
   if (badImage || (elsewhere && item.image)) out.image = undefined;
@@ -369,6 +378,7 @@ export function badPreviewFields(
     errorTitle || (elsewhere && (BY_TITLE_RE.test(item.title) || AUDIO_TITLE_RE.test(item.title) || item.title === item.author || isBoilerplateTitle(item.title)));
   const linkTitle = classify({ url }).title;
   if (!typedTitle && pageTitle && item.title !== linkTitle) out.title = linkTitle;
+  if (codeTitle) out.title = (description && !('description' in out) ? captionTitle(description) : undefined) || linkTitle;
   return out;
 }
 
@@ -393,9 +403,15 @@ function postKindFromUrl(url: string): PostInfo['kind'] {
  * caption instead of the account's name ("Chef (@chef) • Instagram reel"). Undefined for a login wall.
  */
 function withPost(p: LinkPreview, rawTitle: unknown, rawDescription: unknown, url: string): LinkPreview | undefined {
-  const title = typeof rawTitle === 'string' ? rawTitle.replace(/\s+/g, ' ').trim() : '';
+  let title = typeof rawTitle === 'string' ? rawTitle.replace(/\s+/g, ' ').trim() : '';
   const description = typeof rawDescription === 'string' ? rawDescription.replace(/\r\n?/g, '\n').trim() : '';
   const host = hostOf(url);
+  // The post's code as its "title" says nothing: leave it out, and with nothing else to go on, nothing came back.
+  if (isPostCodeTitle(title, url) || isPostCodeTitle(p.title, url)) {
+    title = '';
+    p = { ...p, title: undefined, rawTitle: undefined };
+    if (!description && !p.image) return undefined;
+  }
   // Only social posts: a news site's "LONDON, March 5, 2026: “…”" isn't a caption with its author.
   const post = isPostLink(url) || isPostLink(p.finalUrl);
   const fromText = post && description ? parsePostDescription(description) : undefined;
@@ -406,7 +422,8 @@ function withPost(p: LinkPreview, rawTitle: unknown, rawDescription: unknown, ur
     // "Sorry, this page isn't available" as the title, or under just the platform's name: deleted or not public.
     if (unavailableText(title) || ((!title || isBoilerplateTitle(title)) && unavailableText(description))) throw new PreviewProblem('unavailable');
     // A login wall: just the platform's name, nothing about the post or who posted it.
-    if (isBoilerplateTitle(title) && (!description || WALL_DESCRIPTION_RE.test(description) || isBoilerplateTitle(description))) return undefined;
+    // (A picture here is the post's own: the platform's logo never gets this far.)
+    if (!p.image && isBoilerplateTitle(title) && (!description || WALL_DESCRIPTION_RE.test(description) || isBoilerplateTitle(description))) return undefined;
   }
   if (!fromText && !fromTitle) return p;
 

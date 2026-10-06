@@ -399,6 +399,16 @@ describe('fetchPreview', () => {
     expect(await fetchPreview(reel)).toEqual({ problem: 'failed' });
   });
 
+  it("doesn't take the post's own code for a title", async () => {
+    const reel = 'https://www.instagram.com/reel/AbC123def/?stkn=xyz';
+    mockFetch(() => json({ status: 'success', data: { title: 'AbC123def', image: { url: 'https://scontent.cdninstagram.com/v/x.jpg' }, url: 'https://www.instagram.com/reel/AbC123def/' } }));
+    const p = await fetchPreview(reel);
+    expect(p.title).toBeUndefined();
+    expect(p.image).toBe('https://scontent.cdninstagram.com/v/x.jpg');
+    mockFetch(() => json({ status: 'success', data: { title: 'AbC123def', url: 'https://www.instagram.com/reel/AbC123def/' } }));
+    expect(await fetchPreview(reel)).toEqual({ problem: 'failed' });
+  });
+
   it('keeps a post that comes back under its other path', async () => {
     mockFetch(() =>
       json({
@@ -584,6 +594,14 @@ describe('badPreviewFields', () => {
     // A title the user typed stays.
     expect(keys(badPreviewFields({ ...audio, edited: ['title'] }))).toEqual(['description', 'image', 'siteName']);
     expect(keys(badPreviewFields({ ...profile, title: 'Mei’s ramen spot', edited: ['title'] }))).toEqual(['author', 'description', 'image', 'siteName']);
+  });
+
+  it("replaces the post's code kept as a title, unless the user typed it", () => {
+    const base = { url: reel, image: 'https://scontent.cdninstagram.com/v/x.jpg', siteName: 'Instagram' };
+    expect(badPreviewFields({ ...base, title: 'Other123' })).toBeUndefined();
+    expect(badPreviewFields({ ...base, title: 'AbC123', url: 'https://www.instagram.com/reel/AbC123/', description: 'Night market crawl in Taipei' })?.title).toBe('Night market crawl in Taipei');
+    expect(badPreviewFields({ ...base, title: 'AbC123', url: 'https://www.instagram.com/reel/AbC123/' })?.title).toBe('Instagram reel');
+    expect(badPreviewFields({ ...base, title: 'AbC123', url: 'https://www.instagram.com/reel/AbC123/', edited: ['title'] })).toBeUndefined();
   });
 
   it('only drops a logo when the caption is fine, and leaves good saves and other sites alone', () => {
