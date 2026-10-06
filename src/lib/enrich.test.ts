@@ -13,7 +13,7 @@ vi.mock('./geo', () => ({
 }));
 
 import { addItem, db, saveShared, type NewItem } from './db';
-import { enrichItem, isShortLink, locationHints, looksLikeVenue, REFRESH_OPTIONS, resolvedShortLink, type EnrichOptions } from './enrich';
+import { analyzeNote, enrichItem, isShortLink, locationHints, looksLikeVenue, REFRESH_OPTIONS, resolvedShortLink, type EnrichOptions } from './enrich';
 import { backgroundSignal, reverseGeocode, searchPlaces, type GeoResult } from './geo';
 import { fetchPreview, type LinkPreview } from './metadata';
 import { setSettings } from './settings';
@@ -453,6 +453,39 @@ describe('enrichItem: posts that aren\'t public', () => {
     preview.mockResolvedValue({ title: 'Night market crawl', description: 'Night market crawl', siteName: 'Instagram' });
     expect(await enrichItem(item.id, REFRESH_OPTIONS)).toBe(true);
     expect((await get(item.id)).previewIssue).toBeUndefined();
+  });
+});
+
+describe('analyzeNote', () => {
+  const reel = 'https://www.instagram.com/reel/AbC123def/';
+
+  it("picks up the date and place of a caption pasted into a post's notes", async () => {
+    const { label, iso } = futureDate();
+    const item = await save({ type: 'video', title: 'Instagram reel', url: reel, source: 'instagram' });
+    search.mockResolvedValue([lisbonResult]);
+    await db.items.update(item.id, { note: `Jazz night ${label} 9pm 📍 Hot Clube de Portugal, Lisbon` });
+    await analyzeNote(item.id);
+    const after = await get(item.id);
+    expect(after.when?.start.slice(0, 10)).toBe(iso.slice(0, 10));
+    expect(after.place?.countryCode).toBe('PT');
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it('leaves a date or place the user set or cleared alone', async () => {
+    const { label } = futureDate();
+    const item = await save({ type: 'video', title: 'Instagram reel', url: reel, source: 'instagram', edited: ['when', 'place'] });
+    search.mockResolvedValue([lisbonResult]);
+    await db.items.update(item.id, { note: `Jazz night ${label} 9pm 📍 Hot Clube de Portugal, Lisbon` });
+    await analyzeNote(item.id);
+    const after = await get(item.id);
+    expect(after.when).toBeUndefined();
+    expect(after.place).toBeUndefined();
+  });
+
+  it('does nothing without a note', async () => {
+    const item = await save({ url: reel });
+    await analyzeNote(item.id);
+    expect(await get(item.id)).toEqual(item);
   });
 });
 

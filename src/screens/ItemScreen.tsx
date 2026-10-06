@@ -34,7 +34,7 @@ import { calendarEventFromItem, downloadIcs, googleCalendarUrl, icsFileName, toI
 import { hostOf, normalizeUrl, sourceLabel } from '../lib/classify';
 import { allTags, db, deleteItem, markTodo, toggleItemInCollection, updateItem } from '../lib/db';
 import { authorOf, embedFor, originalTextOf } from '../lib/embed';
-import { enrichItem, REFRESH_OPTIONS } from '../lib/enrich';
+import { analyzeNote, enrichItem, REFRESH_OPTIONS } from '../lib/enrich';
 import { useClock } from '../lib/clock';
 import { dayLabel } from '../lib/format';
 import { directionsLink } from '../lib/geo';
@@ -343,7 +343,11 @@ export function ItemScreen({ id }: { id: string }) {
         multiline
         value={item.note ?? ''}
         placeholder="Ingredients to buy, who recommended it, when it's open…"
-        onSave={(note) => updateItem(item.id, { note: note.trim() || undefined })}
+        onSave={async (note) => {
+          await updateItem(item.id, { note: note.trim() || undefined });
+          // A pasted caption: pick up its date and place.
+          if (note.trim()) void analyzeNote(item.id);
+        }}
       />
 
       {showDescription && (

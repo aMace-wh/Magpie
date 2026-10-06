@@ -391,6 +391,30 @@ export async function enrichItem(id: string, opts: EnrichOptions): Promise<boole
   return fetched;
 }
 
+/**
+ * A note was written or pasted on a save (the caption of a post the preview service couldn't read): looks in it
+ * for an event date and a place, like for any other text, and fills them in when the save has none. Offline for
+ * the date; the place is looked up like any other. Leaves what the user set or cleared alone. Never throws.
+ */
+export async function analyzeNote(id: string): Promise<void> {
+  try {
+    const item = await db.items.get(id);
+    if (!item?.note?.trim()) return;
+    const opts: EnrichOptions = { replaceTitle: false, reclassify: false, dates: true, locate: true, priority: 'user' };
+    const plan = planChanges(item, item, {}, opts, true);
+    const applied = await db.transaction('rw', db.items, async (): Promise<Item | undefined> => {
+      const current = await db.items.get(id);
+      // Changed while this was working out: the next edit analyses again.
+      if (!current || current.note !== item.note) return undefined;
+      if (Object.keys(plan.changes).length) await db.items.update(id, versioned(plan.changes));
+      return { ...current, ...plan.changes };
+    });
+    if (applied && getSettings().previews) await enrichPlace(id, applied, plan, {}, opts);
+  } catch {
+    /* the note is saved; nothing more to do */
+  }
+}
+
 /** Finds a location when the save has none and fills in its details, then writes both at once. */
 async function enrichPlace(id: string, item: Item, plan: Plan, preview: LinkPreview, opts: EnrichOptions): Promise<void> {
   const priority = opts.priority ?? 'background';
