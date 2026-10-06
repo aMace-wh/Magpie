@@ -406,7 +406,7 @@ describe('fetchPreview', () => {
     expect(p.title).toBeUndefined();
     expect(p.image).toBe('https://scontent.cdninstagram.com/v/x.jpg');
     mockFetch(() => json({ status: 'success', data: { title: 'AbC123def', url: 'https://www.instagram.com/reel/AbC123def/' } }));
-    expect(await fetchPreview(reel)).toEqual({ problem: 'failed' });
+    expect(await fetchPreview(reel)).toEqual({ problem: 'unavailable' });
   });
 
   it('keeps a post that comes back under its other path', async () => {

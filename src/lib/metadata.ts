@@ -410,6 +410,8 @@ function withPost(p: LinkPreview, rawTitle: unknown, rawDescription: unknown, ur
   if (isPostCodeTitle(title, url) || isPostCodeTitle(p.title, url)) {
     title = '';
     p = { ...p, title: undefined, rawTitle: undefined };
+    // Instagram answers like this for a post it won't show: that's the same as an error page.
+    if (!description && !p.image && onHost(host, SOCIAL_HOSTS)) throw new PreviewProblem('unavailable');
     if (!description && !p.image) return undefined;
   }
   // Only social posts: a news site's "LONDON, March 5, 2026: “…”" isn't a caption with its author.
